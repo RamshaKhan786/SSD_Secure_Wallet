@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Dashboard · Mini Wallet{% endblock %}
+{% block content %}
+<div id="dash"
+     data-csrf="{{ csrf }}"
+     data-uid="{{ user.id }}"
+     data-uname="{{ user.username }}"
+     data-other-uname="{{ other_user.username }}"
+     data-other-uid="{{ other_user.id }}">
+
+  <header>
+    <h1>💳 Mini Wallet
+      <span class="badge {{ 'b-sec' if secure else 'b-vul' }}">{{ 'SECURE MODE' if secure else 'VULNERABLE MODE' }}</span>
+    </h1>
+    <div>
+      <span class="mut">Session expires in <b id="timer">10:00</b></span>
+      {% if is_admin or not secure %}
+        <a href="/admin/audit"><button class="ghost" type="button">Audit log</button></a>
+      {% endif %}
+      <form method="post" action="/logout" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button class="ghost">Log out</button>
+      </form>
+    </div>
+  </header>
+
+  <div class="tabs">
+    <button id="tw" class="on" data-tab="w">Wallet</button>
+    <button id="tl" class="ghost" data-tab="l">🛡 Security Lab</button>
+  </div><br>
+
+  <div id="wal">
+    <div class="grid">
+      <div class="card">
+        <div class="mut">Welcome, <b id="nm"></b></div>
+        <div class="mut">Available balance</div>
+        <div class="bal" id="bal">—</div>
+      </div>
+      <div class="card">
+        <h3 style="margin:0">Send money</h3>
+        <input id="to" placeholder="Recipient username" autocomplete="off">
+        <input id="amt" placeholder="Amount (Rs.)" inputmode="decimal">
+        <div class="mut" id="hint" style="min-height:20px"></div>
+        <button id="send">Send</button>
+      </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center">
+          <h3 style="margin:0">Transactions</h3>
+          <div>
+            <button class="ghost f on" data-filter="all">All</button>
+            <button class="ghost f" data-filter="sent">Sent</button>
+            <button class="ghost f" data-filter="recv">Received</button>
+            <button class="ghost f" data-filter="failed">Failed</button>
+          </div>
+          <input id="q" placeholder="Search name…" style="max-width:180px">
+        </div>
+        <table>
+          <thead><tr><th>#</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Time (UTC)</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div class="mut" id="empty"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="lab" hidden>
+    <div class="card">
+      <h3 style="margin:0 0 6px">Security Lab</h3>
+      <div class="mut">Each button performs a real attack request from your logged-in browser. In <b>VULNERABLE</b>
+        mode they succeed (❌); in <b>SECURE</b> mode they are blocked (✅). Use it for the before/after demo.</div>
+      <div id="atk"></div><br>
+      <button id="runAllBtn">Run all attacks</button>
+    </div>
+  </div>
+  <div id="toasts"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+{% endblock %}

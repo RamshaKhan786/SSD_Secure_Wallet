@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Audit log · Mini Wallet{% endblock %}
+{% block content %}
+<h3>Audit log</h3>
+<p>Integrity: <b>{{ 'OK' if bad is none else 'TAMPERED at row %s' % bad }}</b></p>
+<table>
+  <tr><th>ID</th><th>Time</th><th>User</th><th>Action</th><th>Detail</th></tr>
+  {% for r in rows %}
+  <tr><td>{{ r.id }}</td><td>{{ r.ts }}</td><td>{{ r.user_id }}</td><td>{{ r.action }}</td><td>{{ r.detail }}</td></tr>
+  {% endfor %}
+</table>
+<a href="/dashboard">Back</a>
+{% endblock %}

@@ -1,0 +1,188 @@
+"""
+db.py — All database access for the Mini Secure Fintech Wallet.
+
+Every sqlite3 query lives in this file. app.py never writes raw SQL — it
+only calls the functions defined here. Policy DECISIONS (password hashing
+algorithm, lockout thresholds, validation rules, audit hash chain, CSRF,
+headers, authorization) live in controls.py; this file only PERSISTS their
+results. See controls.py's docstring for the full control index (C1-C10).
+"""
+import sqlite3
+from datetime import datetime, timezone
+from decimal import Decimal
+from flask import g, current_app
+
+import controls
+
+SIGNUP_CREDIT = 1000_00  # demo starting balance, in paisa (not a security control)
+
+
+# ---------------------------------------------------------------- connection
+def get_db():
+    """One SQLite connection per request, cached on Flask's `g`."""
+    if "db" not in g:
+        g.db = sqlite3.connect(current_app.config["DB"], isolation_level=None)  # manual txns
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+def close_db(exception=None):
+    db = g.pop("db", None)
+    if db:
+        db.close()
+
+
+def init_db(app):
+    """Create tables and seed demo users. Called once at startup, outside a request."""
+    db = sqlite3.connect(app.config["DB"], isolation_level=None)
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL,
+        full_name TEXT, balance INTEGER NOT NULL DEFAULT 0 CHECK(balance >= 0 OR %s),
+        role TEXT NOT NULL DEFAULT 'customer',
+        failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until REAL NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS transactions(
+        id INTEGER PRIMARY KEY, sender_id INTEGER, receiver_id INTEGER,
+        amount INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS audit_log(
+        id INTEGER PRIMARY KEY, ts TEXT, user_id INTEGER, action TEXT, detail TEXT,
+        prev_hash TEXT, hash TEXT);
+    """ % ("0" if app.config["SECURE"] else "1"))
+    if not db.execute("SELECT 1 FROM users").fetchone():
+        secure = app.config["SECURE"]
+        for u, p, n, b, r in [("ali", "Ali@12345", "Ali Khan", 50000_00, "customer"),
+                               ("sara", "Sara@12345", "Sara Ahmed", 10000_00, "customer"),
+                               ("admin", "Admin@12345", "Auditor", 0, "admin")]:
+            pw = controls.hash_password(p) if secure else p  # C1
+            db.execute("INSERT INTO users(username,password,full_name,balance,role) VALUES(?,?,?,?,?)",
+                       (u, pw, n, b, r))
+    db.close()
+
+
+# ---------------------------------------------------------------- passwords
+def store_password(pw):
+    # C1: applied only when secure mode is on; VULN mode stores plaintext for the demo.
+    return controls.hash_password(pw) if current_app.config["SECURE"] else pw
+
+
+# ---------------------------------------------------------------- audit log (C7)
+def now():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def audit(db, uid, action, detail=""):
+    """Append-only log; each row's hash covers the previous row (C7) => tampering is detectable."""
+    if not current_app.config["SECURE"]:
+        return  # VULN: nothing is recorded
+    last = db.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+    prev = last["hash"] if last else controls.GENESIS_HASH
+    ts = now()
+    h = controls.audit_row_hash(prev, ts, uid, action, detail)
+    db.execute("INSERT INTO audit_log(ts,user_id,action,detail,prev_hash,hash) VALUES(?,?,?,?,?,?)",
+               (ts, uid, action, detail, prev, h))
+
+
+def verify_audit(db):
+    """Returns None if the audit chain is intact, else the id of the first bad row."""
+    rows = db.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
+    return controls.verify_audit_chain(rows)
+
+
+def get_audit_rows(db, limit=100):
+    return db.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+
+# ---------------------------------------------------------------- users
+def get_user_by_id(db, uid):
+    return db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+
+
+def get_user_by_username(db, username):
+    return db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+
+
+def get_user_by_credentials_unsafe(db, username, password):
+    # VULN: string-built SQL (injectable) + plaintext password comparison.
+    # Only reachable when app.config["SECURE"] is False (vulnerable demo mode).
+    # This is the deliberate exception to control C2 (parameterized queries).
+    query = f"SELECT * FROM users WHERE username='{username}' AND password='{password}'"
+    return db.execute(query).fetchone()
+
+
+def create_user(db, username, password, full_name):
+    """Raises sqlite3.IntegrityError if the username is already taken."""
+    db.execute("INSERT INTO users(username,password,full_name,balance) VALUES(?,?,?,?)",
+               (username, store_password(password), full_name, SIGNUP_CREDIT))
+    audit(db, None, "REGISTER", username)
+
+
+def mark_login_success(db, uid):
+    db.execute("UPDATE users SET failed_attempts=0 WHERE id=?", (uid,))
+
+
+def mark_login_failure(db, user):
+    """C6: persists the lockout state that controls.next_failed_login_state() decided."""
+    attempt_number = user["failed_attempts"] + 1
+    failed_attempts, locked_until = controls.next_failed_login_state(user)
+    db.execute("UPDATE users SET failed_attempts=?, locked_until=? WHERE id=?",
+               (failed_attempts, locked_until, user["id"]))
+    audit(db, user["id"], "LOGIN_FAILED", f"attempt {attempt_number}")
+
+
+def get_other_demo_user(db, me):
+    """Any other customer account, used only to target the Security Lab demo attacks."""
+    row = db.execute(
+        "SELECT * FROM users WHERE role='customer' AND id != ? ORDER BY id LIMIT 1", (me["id"],)
+    ).fetchone()
+    return row or me
+
+
+# ---------------------------------------------------------------- transfers
+def do_transfer(db, sender, to_username, amount_str):
+    """Returns (ok, message)."""
+    if not current_app.config["SECURE"]:
+        # VULN: no validation, no atomicity, no ownership/overdraft checks
+        amt = int(Decimal(amount_str) * 100)
+        rcv = db.execute("SELECT id FROM users WHERE username=?", (to_username,)).fetchone()
+        db.execute("UPDATE users SET balance=balance-? WHERE id=?", (amt, sender["id"]))
+        if rcv:
+            db.execute("UPDATE users SET balance=balance+? WHERE id=?", (amt, rcv["id"]))
+        db.execute("INSERT INTO transactions(sender_id,receiver_id,amount,status,created_at) VALUES(?,?,?,?,?)",
+                   (sender["id"], rcv["id"] if rcv else None, amt, "SUCCESS", now()))
+        return True, "Transfer complete."
+
+    ok, amt_or_msg = controls.validate_transfer_amount(amount_str)  # C4
+    if not ok:
+        return False, amt_or_msg
+    amt = amt_or_msg
+
+    rcv = db.execute("SELECT id FROM users WHERE username=? AND role='customer'", (to_username,)).fetchone()
+    if not rcv or rcv["id"] == sender["id"]:
+        return False, "Invalid recipient."
+
+    # C4 (atomicity half): all-or-nothing transfer; write lock prevents double-spend races
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        cur = db.execute("UPDATE users SET balance=balance-? WHERE id=? AND balance>=?",
+                         (amt, sender["id"], amt))          # balance re-checked inside the txn
+        if cur.rowcount == 0:
+            db.execute("INSERT INTO transactions(sender_id,receiver_id,amount,status,created_at) VALUES(?,?,?,?,?)",
+                       (sender["id"], rcv["id"], amt, "FAILED", now()))
+            audit(db, sender["id"], "TRANSFER_FAILED", f"to={rcv['id']} amt={amt} insufficient funds")
+            db.execute("COMMIT")
+            return False, "Insufficient funds."
+        db.execute("UPDATE users SET balance=balance+? WHERE id=?", (amt, rcv["id"]))
+        db.execute("INSERT INTO transactions(sender_id,receiver_id,amount,status,created_at) VALUES(?,?,?,?,?)",
+                   (sender["id"], rcv["id"], amt, "SUCCESS", now()))
+        audit(db, sender["id"], "TRANSFER", f"to={rcv['id']} amt={amt}")
+        db.execute("COMMIT")
+        return True, "Transfer complete."
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def get_history(db, uid):
+    return db.execute("""SELECT t.*, s.username AS sname, r.username AS rname FROM transactions t
+        LEFT JOIN users s ON s.id=t.sender_id LEFT JOIN users r ON r.id=t.receiver_id
+        WHERE t.sender_id=? OR t.receiver_id=? ORDER BY t.id DESC""", (uid, uid)).fetchall()

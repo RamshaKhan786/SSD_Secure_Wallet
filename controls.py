@@ -1,12 +1,4 @@
 """
-controls.py — Security control implementations for the Mini Secure Fintech Wallet.
-
-Each function/constant here implements ONE named control from the assignment's
-Security Design Table. db.py and app.py call into this module instead of
-re-implementing policy decisions inline, so every control has a single,
-auditable, independently-testable home — and the report can point directly
-at a function name for "where was the control implemented?".
-
 Control index
 -------------
 C1  Password hashing              hash_password / verify_password
@@ -17,13 +9,14 @@ C2  Parameterized queries         a pattern followed throughout db.py (every
                                    deliberate exception is the vulnerable-mode
                                    demo path in db.get_user_by_credentials_unsafe.
 C3  Object-level authorization    is_owner
-C4  Server-side input validation  validate_registration / validate_transfer_amount
+C4  Role separation (admin-only)  is_admin
+C5  Server-side input validation  validate_registration / validate_transfer_amount
 C5  CSRF protection                new_csrf_token / csrf_token_valid
-C6  Account lockout                is_account_locked / next_failed_login_state
-C7  Tamper-evident audit log       audit_row_hash / verify_audit_chain
-C8  Session hardening              SESSION_SECURITY_CONFIG / rotate_session
-C9  Security response headers      SECURITY_HEADERS
-C10 Role separation (admin-only)   is_admin
+C7  Account lockout                is_account_locked / next_failed_login_state
+C8  Tamper-evident audit log       audit_row_hash / verify_audit_chain
+C9  Session hardening              SESSION_SECURITY_CONFIG / rotate_session
+C10  Security response headers      SECURITY_HEADERS
+C11  Step-up authentication for high-value transfers  needs_step_up / generate_step_up_code / step_up_code_valid
 """
 import hashlib
 import re
@@ -34,11 +27,14 @@ from decimal import Decimal, InvalidOperation
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # ---- policy constants -------------------------------------------------
-MAX_TRANSFER = Decimal("100000")     # C4: per-transaction limit (Rs.)
-MAX_FAILED_LOGINS = 5                # C6: attempts allowed before lockout
-LOCK_SECONDS = 300                   # C6: lockout duration
+MAX_TRANSFER = Decimal("100000")     # C5: per-transaction limit (Rs.)
+MAX_FAILED_LOGINS = 5                # C7: attempts allowed before lockout
+LOCK_SECONDS = 300                   # C7: lockout duration
 USERNAME_PATTERN = re.compile(r"[a-z0-9_]{3,20}")
 MIN_PASSWORD_LEN = 8
+STEP_UP_THRESHOLD = Decimal("10000")  # C11: transfers at/above this need a step-up code
+STEP_UP_CODE_TTL = 120                # C11: seconds the code stays valid
+STEP_UP_MAX_ATTEMPTS = 3      
 
 
 # ---------------------------------------------------------------- C1: password hashing
@@ -57,13 +53,13 @@ def is_owner(session_uid, requested_uid):
     return session_uid == requested_uid
 
 
-# ---------------------------------------------------------------- C10: role separation
+# ---------------------------------------------------------------- C4: role separation
 def is_admin(user):
     """Privileged operations (the audit log) require an explicit admin role."""
     return user is not None and user["role"] == "admin"
 
 
-# ---------------------------------------------------------------- C4: server-side input validation
+# ---------------------------------------------------------------- C5: server-side input validation
 def validate_registration(username, password):
     """Returns (ok, error_message_or_None). Client-side checks are UX only; this is the real gate."""
     if not USERNAME_PATTERN.fullmatch(username):
@@ -84,7 +80,7 @@ def validate_transfer_amount(amount_str):
     return True, int(d * 100)
 
 
-# ---------------------------------------------------------------- C5: CSRF protection
+# ---------------------------------------------------------------- C6: CSRF protection
 def new_csrf_token():
     return secrets.token_hex(16)
 
@@ -93,7 +89,7 @@ def csrf_token_valid(sent_token, expected_token):
     return secrets.compare_digest(sent_token or "", expected_token or "")
 
 
-# ---------------------------------------------------------------- C6: account lockout
+# ---------------------------------------------------------------- C7: account lockout
 def is_account_locked(user):
     return user["locked_until"] > time.time()
 
@@ -109,7 +105,7 @@ def next_failed_login_state(user):
     return n_fail, 0
 
 
-# ---------------------------------------------------------------- C7: tamper-evident audit log
+# ---------------------------------------------------------------- C8: tamper-evident audit log
 GENESIS_HASH = "0" * 64
 
 
@@ -132,7 +128,7 @@ def verify_audit_chain(rows):
     return None
 
 
-# ---------------------------------------------------------------- C8: session hardening
+# ---------------------------------------------------------------- C9: session hardening
 SESSION_SECURITY_CONFIG = {
     "SESSION_COOKIE_HTTPONLY": True,     # JS cannot read the session cookie
     "SESSION_COOKIE_SAMESITE": "Lax",    # cookie not sent on cross-site POSTs
@@ -151,7 +147,7 @@ def rotate_session(session, user_id):
     session["csrf"] = new_csrf_token()
 
 
-# ---------------------------------------------------------------- C9: security response headers
+# ---------------------------------------------------------------- C10: security response headers
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -161,3 +157,22 @@ SECURITY_HEADERS = {
     ),
     "Cache-Control": "no-store",
 }
+# ---------------------------------------------------------------- C11: Step-up authentication for high-value transfers
+def needs_step_up(amount_paisa):
+    return amount_paisa >= int(STEP_UP_THRESHOLD * 100)
+ 
+ 
+def generate_step_up_code():
+    """
+    6-digit one-time code. In a real system this would be pushed over a
+    second channel . This class demo has no SMS/email provider, so the code is
+    returned to the caller to display in the UI, clearly labelled as a demo
+    substitute for a real out-of-band channel — never do this in production.
+    """
+    return f"{secrets.randbelow(1_000_000):06d}"
+ 
+ 
+def step_up_code_valid(entered_code, expected_code, expires_at):
+    if time.time() > expires_at:
+        return False
+    return secrets.compare_digest(str(entered_code or ""), str(expected_code or ""))

@@ -21,6 +21,7 @@ Run:  pip install -r requirements.txt && python app.py
 import os
 import sqlite3
 import secrets
+import time
 from functools import wraps
 from flask import Flask, request, session, redirect, render_template, jsonify, flash, abort
 
@@ -156,7 +157,65 @@ def dashboard():
 @login_required
 def api_transfer():
     d = request.get_json(silent=True) or {}
-    ok, msg = wallet_db.do_transfer(wallet_db.get_db(), current_user(), str(d.get("to", "")), str(d.get("amount", "")))
+    to, amount_str = str(d.get("to", "")), str(d.get("amount", ""))
+    conn = wallet_db.get_db()
+
+    # C11: pause high-value transfers for a step-up code instead of executing
+    # immediately — mirrors the lecture's risk-based re-verification pattern.
+    if app.config["SECURE"]:
+        ok, amt_or_msg = controls.validate_transfer_amount(amount_str)
+        if ok and controls.needs_step_up(amt_or_msg):
+            code = controls.generate_step_up_code()
+            session["stepup"] = {
+                "to": to,
+                "amount": amount_str,
+                "code": code,
+                "expires": time.time() + controls.STEP_UP_CODE_TTL,
+                "attempts": 0,
+            }
+            wallet_db.audit(conn, session["uid"], "STEP_UP_REQUIRED", f"to={to} amount={amount_str}")
+            return jsonify(
+                ok=False,
+                step_up_required=True,
+                message=f"Transfers of Rs. {controls.STEP_UP_THRESHOLD:,.0f}+ need a verification code.",
+                # DEMO ONLY: a real system sends this over a second channel
+                # (SMS/authenticator app) and never returns it in the API
+                # response. It's surfaced here only because this class
+                # project has no SMS/email provider to deliver it through.
+                demo_code=code,
+            ), 200
+
+    ok, msg = wallet_db.do_transfer(conn, current_user(), to, amount_str)
+    return jsonify(ok=ok, message=msg), (200 if ok else 400)
+
+
+@app.route("/api/transfer/confirm", methods=["POST"])
+@login_required
+def api_transfer_confirm():
+    # C11: the pending transfer's to/amount come from the SERVER-HELD session,
+    # never from this request — entering the right code cannot be combined
+    # with a different amount than what was actually verified.
+    d = request.get_json(silent=True) or {}
+    entered_code = str(d.get("code", ""))
+    conn = wallet_db.get_db()
+    pending = session.get("stepup")
+
+    if not pending:
+        return jsonify(ok=False, message="No pending transfer to confirm."), 400
+
+    if not controls.step_up_code_valid(entered_code, pending["code"], pending["expires"]):
+        pending["attempts"] += 1
+        if pending["attempts"] >= controls.STEP_UP_MAX_ATTEMPTS:
+            session.pop("stepup", None)
+            wallet_db.audit(conn, session["uid"], "STEP_UP_FAILED", "max attempts exceeded, transfer voided")
+            return jsonify(ok=False, message="Too many incorrect codes. Transfer cancelled — please try again."), 400
+        session["stepup"] = pending
+        wallet_db.audit(conn, session["uid"], "STEP_UP_FAILED", f"attempt {pending['attempts']}")
+        return jsonify(ok=False, message="Incorrect or expired code."), 400
+
+    session.pop("stepup", None)
+    ok, msg = wallet_db.do_transfer(conn, current_user(), pending["to"], pending["amount"])
+    wallet_db.audit(conn, session["uid"], "STEP_UP_OK", f"to={pending['to']} amount={pending['amount']}")
     return jsonify(ok=ok, message=msg), (200 if ok else 400)
 
 

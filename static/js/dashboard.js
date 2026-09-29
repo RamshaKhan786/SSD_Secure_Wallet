@@ -106,6 +106,23 @@ async function send() {
   if (!confirm(`Send Rs. ${amount} to ${to}?`)) return;
   $('#send').disabled = true;
   const r = await api('/api/transfer', { method: 'POST', json: { to, amount } });
+
+  if (r.ok && r.data && r.data.step_up_required) {
+    // C11: high-value transfer paused for a one-time code before it executes.
+    // demo_code is shown here only because this class project has no real
+    // SMS/email channel — a real system would never return it to the client.
+    const hint = r.data.demo_code ? ` (demo code: ${r.data.demo_code})` : '';
+    const entered = prompt(r.data.message + hint + '\n\nEnter the verification code:');
+    $('#send').disabled = false;
+    if (entered === null) { toast('Transfer cancelled.', 'err'); refresh(); return; }
+
+    const confirmResult = await api('/api/transfer/confirm', { method: 'POST', json: { code: entered } });
+    toast((confirmResult.data && confirmResult.data.message) || ('Request failed (HTTP ' + confirmResult.status + ')'), confirmResult.ok ? 'ok' : 'err');
+    if (confirmResult.ok) { $('#to').value = ''; $('#amt').value = ''; hint(); }
+    refresh();
+    return;
+  }
+
   $('#send').disabled = false;
   toast((r.data && r.data.message) || ('Request failed (HTTP ' + r.status + ')'), r.ok ? 'ok' : 'err');
   if (r.ok) { $('#to').value = ''; $('#amt').value = ''; hint(); }
@@ -119,6 +136,7 @@ const ATK = [
   ['W4', 'Overdraft: send more than the balance', () => api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '99999' } })],
   ['W5', 'Forged transfer with NO CSRF token', () => api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '100' }, csrf: false })],
   ['W8', 'Open the admin audit log as a normal user', () => api('/admin/audit')],
+  ['C11', 'Confirm a high-value transfer with a guessed code (no step-up was ever issued)', () => api('/api/transfer/confirm', { method: 'POST', json: { code: '000000' } })],
 ];
 
 async function runAtk(i) {

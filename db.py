@@ -138,8 +138,13 @@ def get_other_demo_user(db, me):
 
 
 # ---------------------------------------------------------------- transfers
-def do_transfer(db, sender, to_username, amount_str):
-    """Returns (ok, message)."""
+def do_transfer(db, sender, to_username, amount_str, step_up_verified=False):
+    """Returns (ok, message).
+
+    step_up_verified must be True only when the caller has already checked a
+    valid step-up code (see /api/transfer/confirm in app.py). It defaults to
+    False so any other caller is safe automatically.
+    """
     if not current_app.config["SECURE"]:
         # VULN: no validation, no atomicity, no ownership/overdraft checks
         amt = int(Decimal(amount_str) * 100)
@@ -151,16 +156,24 @@ def do_transfer(db, sender, to_username, amount_str):
                    (sender["id"], rcv["id"] if rcv else None, amt, "SUCCESS", now()))
         return True, "Transfer complete."
 
-    ok, amt_or_msg = controls.validate_transfer_amount(amount_str)  # C4
+    # C5: server-side input validation
+    ok, amt_or_msg = controls.validate_transfer_amount(amount_str)
     if not ok:
         return False, amt_or_msg
     amt = amt_or_msg
 
+    # Recipient must be a different, registered customer
     rcv = db.execute("SELECT id FROM users WHERE username=? AND role='customer'", (to_username,)).fetchone()
     if not rcv or rcv["id"] == sender["id"]:
         return False, "Invalid recipient."
 
-    # C4 (atomicity half): all-or-nothing transfer; write lock prevents double-spend races
+    # C11: high-value transfers can only proceed after a verified step-up code.
+    # Enforced here, at the point where money moves, so no route can bypass it.
+    if controls.needs_step_up(amt) and not step_up_verified:
+        audit(db, sender["id"], "STEP_UP_BYPASS_BLOCKED", f"to={rcv['id']} amt={amt}")
+        return False, "High-value transfers require step-up verification."
+
+    # C12: all-or-nothing transfer; the write lock prevents double-spend races
     db.execute("BEGIN IMMEDIATE")
     try:
         cur = db.execute("UPDATE users SET balance=balance-? WHERE id=? AND balance>=?",

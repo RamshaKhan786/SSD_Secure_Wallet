@@ -69,7 +69,7 @@ def authorize_owner(uid):
 
 @app.before_request
 def csrf_protect():
-    # C5: every state-changing request from a logged-in user needs the per-session token
+    # C6: every state-changing request from a logged-in user needs the per-session token
     if app.config["SECURE"] and request.method == "POST" and "uid" in session:
         sent = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
         if not controls.csrf_token_valid(sent, session.get("csrf", "")):
@@ -193,8 +193,8 @@ def api_transfer():
 @login_required
 def api_transfer_confirm():
     # C11: the pending transfer's to/amount come from the SERVER-HELD session,
-    # never from this request — entering the right code cannot be combined
-    # with a different amount than what was actually verified.
+    # never from this request, so a correct code cannot be combined with a
+    # different amount than the one that was actually verified.
     d = request.get_json(silent=True) or {}
     entered_code = str(d.get("code", ""))
     conn = wallet_db.get_db()
@@ -208,14 +208,22 @@ def api_transfer_confirm():
         if pending["attempts"] >= controls.STEP_UP_MAX_ATTEMPTS:
             session.pop("stepup", None)
             wallet_db.audit(conn, session["uid"], "STEP_UP_FAILED", "max attempts exceeded, transfer voided")
-            return jsonify(ok=False, message="Too many incorrect codes. Transfer cancelled — please try again."), 400
+            return jsonify(ok=False, message="Too many incorrect codes. Transfer cancelled. Please try again."), 400
         session["stepup"] = pending
         wallet_db.audit(conn, session["uid"], "STEP_UP_FAILED", f"attempt {pending['attempts']}")
         return jsonify(ok=False, message="Incorrect or expired code."), 400
 
+    # Code verified: consume it (one-time use) and run the transfer with the
+    # step-up flag set. do_transfer refuses high-value transfers without it.
     session.pop("stepup", None)
-    ok, msg = wallet_db.do_transfer(conn, current_user(), pending["to"], pending["amount"])
-    wallet_db.audit(conn, session["uid"], "STEP_UP_OK", f"to={pending['to']} amount={pending['amount']}")
+    ok, msg = wallet_db.do_transfer(conn, current_user(), pending["to"], pending["amount"],
+                                    step_up_verified=True)
+
+    # Log the outcome accurately: the code was valid, but the transfer itself
+    # may still fail (e.g. insufficient funds).
+    wallet_db.audit(conn, session["uid"],
+                    "STEP_UP_OK" if ok else "STEP_UP_VERIFIED_TRANSFER_FAILED",
+                    f"to={pending['to']} amount={pending['amount']}")
     return jsonify(ok=ok, message=msg), (200 if ok else 400)
 
 

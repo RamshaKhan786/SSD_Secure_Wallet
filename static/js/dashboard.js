@@ -137,6 +137,19 @@ const ATK = [
   ['W5', 'Forged transfer with NO CSRF token', () => api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '100' }, csrf: false })],
   ['W8', 'Open the admin audit log as a normal user', () => api('/admin/audit')],
   ['C11', 'Confirm a high-value transfer with a guessed code (no step-up was ever issued)', () => api('/api/transfer/confirm', { method: 'POST', json: { code: '000000' } })],
+  ['W13', 'Bypass step-up: send 15,000 via the old /transfer route', async () => {
+  const before = (await api(`/api/wallet/${ME_ID}/balance`)).data.balance;
+  await fetch('/transfer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: new URLSearchParams({to: OTHER, amount: '15000', csrf_token: CSRF}),
+    credentials: 'same-origin'
+  });
+  const after = (await api(`/api/wallet/${ME_ID}/balance`)).data.balance;
+  const moved = after < before;
+  return {status: 200, ok: moved,
+          data: {message: moved ? 'Money moved without a code!' : 'Balance unchanged, step-up enforced'}};
+}],
 ];
 
 async function runAtk(i) {

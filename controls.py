@@ -11,7 +11,7 @@ C2  Parameterized queries         a pattern followed throughout db.py (every
 C3  Object-level authorization    is_owner
 C4  Role separation (admin-only)  is_admin
 C5  Server-side input validation  validate_registration / validate_transfer_amount
-C5  CSRF protection                new_csrf_token / csrf_token_valid
+C6  CSRF protection                new_csrf_token / csrf_token_valid
 C7  Account lockout                is_account_locked / next_failed_login_state
 C8  Tamper-evident audit log       audit_row_hash / verify_audit_chain
 C9  Session hardening              SESSION_SECURITY_CONFIG / rotate_session

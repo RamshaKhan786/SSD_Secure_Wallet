@@ -7,6 +7,7 @@ const OTHER_ID = Number(dashEl.dataset.otherUid);
 
 const $ = s => document.querySelector(s);
 let txs = [], filt = 'all', ttl = 600, bal = 0, shown = 0;
+let beneficiaries = [];
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const rs = p => 'Rs. ' + (p / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -45,6 +46,116 @@ function countTo(v) {
     $('#bal').textContent = rs(Math.round(shown));
     if (k < 1) requestAnimationFrame(f);
   })(t0);
+}
+
+
+async function loadBeneficiaries() {
+  const r = await api('/api/beneficiaries');
+  if (!r.ok || !r.data) return;
+
+  beneficiaries = r.data;
+  renderBeneficiaries();
+}
+
+function renderBeneficiaries() {
+  const container = $('#beneficiaryList');
+  const select = $('#to');
+
+  if (container) {
+    if (!beneficiaries.length) {
+      container.innerHTML = '<div class="mut">No beneficiaries added yet.</div>';
+    } else {
+      container.innerHTML = beneficiaries.map(b => `
+        <div class="beneficiary-row" data-beneficiary-id="${Number(b.user_id)}">
+          <div>
+            <b>${esc(b.full_name || b.username)}</b>
+            <div class="mut">@${esc(b.username)}</div>
+          </div>
+          <button type="button" class="ghost remove-beneficiary"
+                  data-user-id="${Number(b.user_id)}">Remove</button>
+        </div>
+      `).join('');
+
+      container.querySelectorAll('.remove-beneficiary').forEach(btn => {
+        btn.addEventListener('click', () => removeBeneficiary(btn.dataset.userId));
+      });
+    }
+  }
+
+  // If the existing transfer recipient is a select element, populate it
+  // from the saved beneficiaries. If it is an input, leave it unchanged.
+  if (select && select.tagName === 'SELECT') {
+    const current = select.value;
+    select.innerHTML =
+      '<option value="">-- Select Beneficiary --</option>' +
+      beneficiaries.map(b =>
+        `<option value="${esc(b.username)}">${esc(b.full_name || b.username)} (@${esc(b.username)})</option>`
+      ).join('');
+    if (beneficiaries.some(b => b.username === current)) select.value = current;
+  }
+}
+
+async function addBeneficiary() {
+  const input = $('#beneficiaryUsername');
+  if (!input) return;
+
+  const username = input.value.trim().toLowerCase();
+  if (!username) {
+    toast('Enter a beneficiary username.', 'err');
+    return;
+  }
+
+  const body = new URLSearchParams();
+  body.set('beneficiary_username', username);
+  body.set('csrf_token', CSRF);
+
+  const r = await fetch('/beneficiary/add', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-CSRF-Token': CSRF
+    },
+    body,
+    credentials: 'same-origin'
+  });
+
+  if (r.redirected && r.url.includes('/login')) {
+    location = '/login';
+    return;
+  }
+
+  if (r.ok) {
+    input.value = '';
+    toast('Beneficiary request submitted.', 'ok');
+    await loadBeneficiaries();
+  } else {
+    toast('Unable to add beneficiary.', 'err');
+  }
+}
+
+async function removeBeneficiary(userId) {
+  if (!confirm('Remove this beneficiary?')) return;
+
+  const body = new URLSearchParams();
+  body.set('beneficiary_id', userId);
+  body.set('csrf_token', CSRF);
+
+  const r = await fetch('/beneficiary/remove', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-CSRF-Token': CSRF
+    },
+    body,
+    credentials: 'same-origin'
+  });
+
+  if (r.ok) {
+    toast('Beneficiary removed.', 'ok');
+    await loadBeneficiaries();
+  } else {
+    toast('Unable to remove beneficiary.', 'err');
+  }
 }
 
 async function refresh() {
@@ -195,6 +306,19 @@ function wireEvents() {
   $('#q').addEventListener('input', render);
   $('#send').addEventListener('click', send);
   $('#runAllBtn').addEventListener('click', runAll);
+
+  const addBtn = $('#addBeneficiaryBtn');
+  if (addBtn) addBtn.addEventListener('click', addBeneficiary);
+
+  const beneficiaryInput = $('#beneficiaryUsername');
+  if (beneficiaryInput) {
+    beneficiaryInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addBeneficiary();
+      }
+    });
+  }
 }
 
 $('#nm').textContent = ME;

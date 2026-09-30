@@ -99,17 +99,18 @@ def index():
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
-        u, p, n = (request.form.get(k, "").strip() for k in ("username", "password", "full_name"))
-        ok, err = controls.validate_registration(u, p) if app.config["SECURE"] else (True, None)  # C4
+        u, p, n, e, c = (request.form.get(k, "").strip() for k in
+                          ("username", "password", "full_name", "email", "cnic"))
+        ok, err = controls.validate_registration(u, p, e, c) if app.config["SECURE"] else (True, None)
         if not ok:
             flash(err)
         else:
             try:
-                wallet_db.create_user(wallet_db.get_db(), u, p, n[:60])
+                wallet_db.create_user(wallet_db.get_db(), u, p, n[:60], e, c)
                 flash("Account created. Please log in.")
                 return redirect("/login")
             except sqlite3.IntegrityError:
-                flash("Username unavailable.")
+                flash("Username, email, or CNIC already in use.")
     return render_template("register.html")
 
 
@@ -143,14 +144,67 @@ def login():
 @login_required
 def dashboard():
     me = current_user()
-    other = wallet_db.get_other_demo_user(wallet_db.get_db(), me)
+    conn = wallet_db.get_db()
+    other = wallet_db.get_other_demo_user(conn, me)
+    beneficiaries = wallet_db.get_beneficiaries(conn, session["uid"])
+
     return render_template(
         "dashboard.html",
         user=me,
         other_user=other,
+        beneficiaries=beneficiaries,
         csrf=session["csrf"],
         is_admin=controls.is_admin(me),  # C10
     )
+
+
+# ---------------------------------------------------------------- beneficiaries
+
+@app.route("/beneficiary/add", methods=["POST"])
+@login_required
+def add_beneficiary():
+    beneficiary_username = request.form.get(
+        "beneficiary_username",
+        ""
+    ).strip().lower()
+
+    if not beneficiary_username:
+        flash("Please enter a beneficiary username.")
+        return redirect("/dashboard")
+
+    conn = wallet_db.get_db()
+
+    ok, message = wallet_db.add_beneficiary(
+        conn,
+        session["uid"],
+        beneficiary_username
+    )
+
+    flash(message)
+    return redirect("/dashboard")
+
+
+@app.route("/beneficiary/remove", methods=["POST"])
+@login_required
+def remove_beneficiary():
+    beneficiary_id = request.form.get("beneficiary_id", "")
+
+    try:
+        beneficiary_id = int(beneficiary_id)
+    except (ValueError, TypeError):
+        flash("Invalid beneficiary.")
+        return redirect("/dashboard")
+
+    conn = wallet_db.get_db()
+
+    ok, message = wallet_db.remove_beneficiary(
+        conn,
+        session["uid"],
+        beneficiary_id
+    )
+
+    flash(message)
+    return redirect("/dashboard")
 
 
 @app.route("/api/transfer", methods=["POST"])

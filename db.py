@@ -36,18 +36,29 @@ def init_db(app):
     """Create tables and seed demo users. Called once at startup, outside a request."""
     db = sqlite3.connect(app.config["DB"], isolation_level=None)
     db.executescript("""
-    CREATE TABLE IF NOT EXISTS users(
-        id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL,
-        full_name TEXT, balance INTEGER NOT NULL DEFAULT 0 CHECK(balance >= 0 OR %s),
-        role TEXT NOT NULL DEFAULT 'customer',
-        failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until REAL NOT NULL DEFAULT 0);
+   CREATE TABLE IF NOT EXISTS users(
+    id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL,
+    full_name TEXT, email TEXT UNIQUE NOT NULL, cnic TEXT UNIQUE NOT NULL,
+    balance INTEGER NOT NULL DEFAULT 0 CHECK(balance >= 0 OR %s),
+    role TEXT NOT NULL DEFAULT 'customer',
+    failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until REAL NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS transactions(
         id INTEGER PRIMARY KEY, sender_id INTEGER, receiver_id INTEGER,
         amount INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS audit_log(
         id INTEGER PRIMARY KEY, ts TEXT, user_id INTEGER, action TEXT, detail TEXT,
         prev_hash TEXT, hash TEXT);
-    """ % ("0" if app.config["SECURE"] else "1"))
+    
+    CREATE TABLE IF NOT EXISTS beneficiaries(
+        id INTEGER PRIMARY KEY,
+        owner_id INTEGER NOT NULL,
+        beneficiary_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(owner_id, beneficiary_id),
+        FOREIGN KEY(owner_id) REFERENCES users(id),
+        FOREIGN KEY(beneficiary_id) REFERENCES users(id)
+    );
+""" % ("0" if app.config["SECURE"] else "1"))
     if not db.execute("SELECT 1 FROM users").fetchone():
         secure = app.config["SECURE"]
         for u, p, n, b, r in [("ali", "Ali@12345", "Ali Khan", 50000_00, "customer"),
@@ -109,10 +120,12 @@ def get_user_by_credentials_unsafe(db, username, password):
     return db.execute(query).fetchone()
 
 
-def create_user(db, username, password, full_name):
-    """Raises sqlite3.IntegrityError if the username is already taken."""
-    db.execute("INSERT INTO users(username,password,full_name,balance) VALUES(?,?,?,?)",
-               (username, store_password(password), full_name, SIGNUP_CREDIT))
+def create_user(db, username, password, full_name, email, cnic):
+    """Raises sqlite3.IntegrityError if the username, email, or CNIC is already taken."""
+    db.execute(
+        "INSERT INTO users(username,password,full_name,email,cnic,balance) VALUES(?,?,?,?,?,?)",
+        (username, store_password(password), full_name, email, cnic, SIGNUP_CREDIT)
+    )
     audit(db, None, "REGISTER", username)
 
 
@@ -199,3 +212,92 @@ def get_history(db, uid):
     return db.execute("""SELECT t.*, s.username AS sname, r.username AS rname FROM transactions t
         LEFT JOIN users s ON s.id=t.sender_id LEFT JOIN users r ON r.id=t.receiver_id
         WHERE t.sender_id=? OR t.receiver_id=? ORDER BY t.id DESC""", (uid, uid)).fetchall()
+
+
+# ---------------------------------------------------------------- beneficiaries
+
+def add_beneficiary(db, owner_id, beneficiary_username):
+    """
+    Add a registered customer as a beneficiary for the logged-in user.
+    Returns (True, message) on success or (False, message) on failure.
+    """
+    beneficiary = db.execute(
+        "SELECT id, username, full_name, role FROM users WHERE username=?",
+        (beneficiary_username,)
+    ).fetchone()
+
+    if not beneficiary:
+        return False, "Beneficiary does not exist."
+
+    if beneficiary["id"] == owner_id:
+        return False, "You cannot add yourself as a beneficiary."
+
+    if beneficiary["role"] != "customer":
+        return False, "This account cannot be added as a beneficiary."
+
+    existing = db.execute(
+        "SELECT id FROM beneficiaries WHERE owner_id=? AND beneficiary_id=?",
+        (owner_id, beneficiary["id"])
+    ).fetchone()
+
+    if existing:
+        return False, "This beneficiary has already been added."
+
+    db.execute(
+        """
+        INSERT INTO beneficiaries(owner_id, beneficiary_id, created_at)
+        VALUES(?,?,?)
+        """,
+        (owner_id, beneficiary["id"], now())
+    )
+
+    audit(
+        db,
+        owner_id,
+        "BENEFICIARY_ADDED",
+        f"beneficiary={beneficiary['username']}"
+    )
+
+    return True, f"{beneficiary['username']} added as beneficiary."
+
+
+def get_beneficiaries(db, owner_id):
+    """Return only beneficiaries belonging to the logged-in user."""
+    return db.execute(
+        """
+        SELECT
+            b.id,
+            u.id AS user_id,
+            u.username,
+            u.full_name,
+            b.created_at
+        FROM beneficiaries b
+        JOIN users u ON u.id = b.beneficiary_id
+        WHERE b.owner_id=?
+        ORDER BY b.id DESC
+        """,
+        (owner_id,)
+    ).fetchall()
+
+
+def remove_beneficiary(db, owner_id, beneficiary_id):
+    """Remove a beneficiary only if it belongs to the logged-in user."""
+    cur = db.execute(
+        """
+        DELETE FROM beneficiaries
+        WHERE owner_id=? AND beneficiary_id=?
+        """,
+        (owner_id, beneficiary_id)
+    )
+
+    if cur.rowcount == 0:
+        return False, "Beneficiary not found."
+
+    audit(
+        db,
+        owner_id,
+        "BENEFICIARY_REMOVED",
+        f"beneficiary_id={beneficiary_id}"
+    )
+
+    return True, "Beneficiary removed."

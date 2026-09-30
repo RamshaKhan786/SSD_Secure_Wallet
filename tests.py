@@ -7,7 +7,7 @@ import app as w
 
 def fresh(mode):
     w.app.config.update(DB=tempfile.mktemp(suffix=".db"), SECURE=(mode == "secure"), TESTING=True)
-    w.init_db()
+    w.wallet_db.init_db(w.app)
     return w.app.test_client()
 
 def q(sql, *a):
@@ -65,17 +65,58 @@ def t7(c):  # W7 audit trail + tamper detection
     q("UPDATE audit_log SET detail='to=1 amt=1' WHERE action='TRANSFER'")   # attacker edits DB
     with w.app.app_context():
         db = sqlite3.connect(w.app.config["DB"]); db.row_factory = sqlite3.Row
-        bad = w.verify_audit(db); db.close()
+        bad = w.wallet_db.verify_audit(db); db.close()
     return f"audit rows recorded: {n}; after editing a row, verify_audit -> tampered row id {bad}"
 
 def t8(c):  # W8 privileged endpoint reachable by normal customer
     login(c, "sara", "Sara@12345")
     return f"customer sara opens /admin/audit -> HTTP {c.get('/admin/audit').status_code}"
 
-TESTS = [("W1 Plaintext credentials", t1), ("W2 SQL injection at login", t2),
-         ("W3 Access to another user's wallet (IDOR)", t3), ("W4 Transfer manipulation", t4),
-         ("W5 CSRF forged transfer", t5), ("W6 Brute-force login", t6),
-         ("W7 Missing / tamperable audit trail", t7), ("W8 Customer reaches admin function", t8)]
+def t9(c):  # W9 beneficiary management
+    login(c, "sara", "Sara@12345")
+
+    r1 = c.post(
+        "/beneficiary/add",
+        data={
+            "beneficiary_username": "ali",
+            "csrf_token": token(c)
+        }
+    )
+
+    with w.app.app_context():
+        db = w.wallet_db.get_db()
+        count = db.execute(
+            """
+            SELECT COUNT(*)
+            FROM beneficiaries
+            WHERE owner_id=(SELECT id FROM users WHERE username='sara')
+              AND beneficiary_id=(SELECT id FROM users WHERE username='ali')
+            """
+        ).fetchone()[0]
+
+    r2 = c.post(
+        "/beneficiary/add",
+        data={
+            "beneficiary_username": "sara",
+            "csrf_token": token(c)
+        }
+    )
+
+    return (
+        f"add ali -> HTTP {r1.status_code}, saved={count == 1}; "
+        f"add self -> HTTP {r2.status_code}"
+    )
+
+
+TESTS = [("W1 Plaintext credentials", t1), 
+         ("W2 SQL injection at login", t2),
+         ("W3 Access to another user's wallet (IDOR)", t3),
+         ("W4 Transfer manipulation", t4),
+         ("W5 CSRF forged transfer", t5), 
+         ("W6 Brute-force login", t6),
+         ("W7 Missing / tamperable audit trail", t7),
+         ("W8 Customer reaches admin function", t8), 
+         ("W9 Beneficiary management", t9)]
 
 if __name__ == "__main__":
     for name, fn in TESTS:

@@ -37,6 +37,10 @@ STEP_UP_CODE_TTL = 120                # C11: seconds the code stays valid
 STEP_UP_MAX_ATTEMPTS = 3      
 
 
+GMAIL_PATTERN = re.compile(r"^[a-zA-Z0-9](?:[a-zA-Z0-9.]{0,63})[a-zA-Z0-9]@gmail\.com$") # : Gmail address pattern for beneficiary management
+PASSWORD_PATTERN = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^\w\s]).{8,}$") # : at least 8 chars, 1 upper, 1 lower, 1 digit, 1 special char
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$") # : basic email pattern
+CNIC_PATTERN = re.compile(r"^\d{5}-\d{7}-\d{1}$")  # : CNIC pattern 
 # ---------------------------------------------------------------- C1: password hashing
 def hash_password(password):
     """Salted, slow hash (werkzeug/scrypt). Plaintext passwords are never stored."""
@@ -60,12 +64,16 @@ def is_admin(user):
 
 
 # ---------------------------------------------------------------- C5: server-side input validation
-def validate_registration(username, password):
+def validate_registration(username, password, email, cnic):
     """Returns (ok, error_message_or_None). Client-side checks are UX only; this is the real gate."""
     if not USERNAME_PATTERN.fullmatch(username):
         return False, "Username: 3-20 chars [a-z0-9_]."
-    if len(password) < MIN_PASSWORD_LEN:
-        return False, f"Password must be at least {MIN_PASSWORD_LEN} characters."
+    if not PASSWORD_PATTERN.fullmatch(password):
+        return False, "Password must be 8+ chars with upper, lower, digit, and special char."
+    if not EMAIL_PATTERN.fullmatch(email):
+        return False, "Enter a valid email address."
+    if not CNIC_PATTERN.fullmatch(cnic):
+        return False, "CNIC must be in the format 12345-1234567-1."
     return True, None
 
 

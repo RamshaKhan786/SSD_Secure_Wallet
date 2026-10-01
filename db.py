@@ -47,6 +47,8 @@ def init_db(app):
             username TEXT UNIQUE NOT NULL,
             password TEXT NOT NULL,
             full_name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            cnic TEXT UNIQUE NOT NULL,
             balance INTEGER NOT NULL DEFAULT 0 CHECK({balance_check}),
             role TEXT NOT NULL DEFAULT 'customer' CHECK(role IN ('customer','admin')),
             failed_attempts INTEGER NOT NULL DEFAULT 0 CHECK(failed_attempts >= 0),
@@ -110,16 +112,17 @@ def init_db(app):
     if not db.execute("SELECT 1 FROM users LIMIT 1").fetchone():
         secure = app.config["SECURE"]
         demo_users = [
-            ("ali", "Ali@12345", "Ali Khan", 50000_00, "customer"),
-            ("sara", "Sara@12345", "Sara Ahmed", 10000_00, "customer"),
-            ("admin", "Admin@12345", "Auditor", 0, "admin"),
+            ("ali", "Ali@12345", "Ali Khan", "ali@gmail.com", "12345-1234567-1", 50000_00, "customer"),
+            ("sara", "Sara@12345", "Sara Ahmed", "sara@gmail.com", "12345-7654321-2", 10000_00, "customer"),
+            ("admin", "Admin@12345", "Auditor", "admin@gmail.com", "12345-0000000-9", 0, "admin")
         ]
-        for username, password, full_name, balance, role in demo_users:
-            stored_password = controls.hash_password(password) if secure else password
-            db.execute(
-                "INSERT INTO users(username,password,full_name,balance,role) VALUES(?,?,?,?,?)",
-                (username, stored_password, full_name, balance, role),
-            )
+    for username, password, full_name, email, cnic, balance, role in demo_users:
+        stored_password = controls.hash_password(password) if secure else password
+        stored_cnic = controls.encrypt_cnic(cnic, app.config["SECRET_KEY"]) if secure else cnic
+        db.execute(
+            "INSERT INTO users(username,password,full_name,email,cnic,balance,role) VALUES(?,?,?,?,?,?,?)",
+            (username, stored_password, full_name, email, stored_cnic, balance, role),
+    )
     db.close()
 
 
@@ -178,10 +181,12 @@ def get_user_by_credentials_unsafe(db, username, password):
     return db.execute(query).fetchone()
 
 
-def create_user(db, username, password, full_name):
+def create_user(db, username, password, full_name, email, cnic):
+    stored_cnic = controls.encrypt_cnic(cnic, current_app.config["SECRET_KEY"]) \
+        if current_app.config["SECURE"] else cnic
     db.execute(
-        "INSERT INTO users(username,password,full_name,balance) VALUES(?,?,?,?)",
-        (username, store_password(password), full_name, SIGNUP_CREDIT),
+        "INSERT INTO users(username,password,full_name,email,cnic,balance) VALUES(?,?,?,?,?,?)",
+        (username, store_password(password), full_name, email, stored_cnic, SIGNUP_CREDIT),
     )
     audit(db, None, "REGISTER", username)
 

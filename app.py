@@ -170,9 +170,11 @@ def register():
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         full_name = request.form.get("full_name", "").strip()
+        email = request.form.get("email", "").strip()
+        cnic = request.form.get("cnic", "").strip()
 
         if app.config["SECURE"]:
-            ok, error = controls.validate_registration(username, password, full_name)
+            ok, error = controls.validate_registration(username, password, full_name, email, cnic)
         else:
             ok, error = True, None
 
@@ -185,11 +187,13 @@ def register():
                     username,
                     password,
                     full_name[: controls.MAX_FULL_NAME_LEN],
+                    email,
+                    cnic,
                 )
                 flash("Account created. Please log in.")
                 return redirect("/login")
             except sqlite3.IntegrityError:
-                flash("Username unavailable.")
+                flash("Username, email, or CNIC already in use.")
 
     return render_template("register.html")
 
@@ -230,6 +234,10 @@ def login():
 def dashboard():
     me = current_user()
     other = wallet_db.get_other_demo_user(wallet_db.get_db(), me)
+
+    decrypted_cnic = controls.decrypt_cnic(me["cnic"], app.config["SECRET_KEY"]) if app.config["SECURE"] else me["cnic"]
+    masked_cnic = controls.mask_cnic(decrypted_cnic) if decrypted_cnic else "****"
+
     return render_template(
         "dashboard.html",
         user=me,
@@ -237,6 +245,7 @@ def dashboard():
         csrf=session["csrf"],
         session_timeout=controls.SESSION_IDLE_TIMEOUT,
         is_admin=controls.is_admin(me),
+        masked_cnic=masked_cnic,
     )
 
 

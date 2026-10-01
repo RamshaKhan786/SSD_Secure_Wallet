@@ -5,6 +5,7 @@ const ME = dashEl.dataset.uname;
 const OTHER = dashEl.dataset.otherUname;
 const OTHER_ID = Number(dashEl.dataset.otherUid);
 const SESSION_TIMEOUT = Number(dashEl.dataset.sessionTimeout) || 600;
+const CNIC = dashEl.dataset.cnic || '';
 
 const $ = selector => document.querySelector(selector);
 let txs = [];
@@ -438,6 +439,7 @@ function wireEvents() {
 }
 
 $('#nm').textContent = ME;
+$('#cnic').textContent = CNIC;
 buildAttackList();
 wireEvents();
 refresh();

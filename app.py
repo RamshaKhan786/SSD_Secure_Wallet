@@ -1,92 +1,160 @@
 """
-Mini Secure Fintech Wallet  (Flask + SQLite)
+Mini Secure Fintech Wallet (Flask + SQLite)
 
-File split:
-  - app.py       -> ONLY routing/HTTP: URL handlers, session wiring, and
-                     wiring controls into the request lifecycle (before/after
-                     request hooks). No raw SQL, no control policy logic.
-  - db.py        -> ALL database access (connections, queries, transfer
-                     persistence, audit log storage).
-  - controls.py  -> ALL security control policy/algorithms (C1-C10). See its
-                     docstring for the full control index.
-  - templates/, static/ -> presentation (Jinja2 HTML, CSS, JS).
+Application structure
+---------------------
+app.py       Routes, HTTP handling, sessions, request lifecycle.
+db.py        All database access and transaction persistence.
+controls.py  Security policies and security-control algorithms.
+templates/   Jinja2 HTML presentation.
+static/      Browser-side JavaScript and CSS.
 
-Two modes, switched by env var WALLET_MODE (or app.config["SECURE"]):
-  secure      (default) - all security controls ON
-  vulnerable            - controls OFF, used ONLY for the before/after demo.
-                          Every intentionally weak spot is marked  # VULN.
-
-Run:  pip install -r requirements.txt && python app.py
+two demonstration modes
+-----------------------
+secure      Default. Security controls are enabled.
+vulnerable  Deliberately weak mode for the assignment's before/after testing.
+             Run it only on a local test machine.
 """
+
 import os
-import sqlite3
 import secrets
+import sqlite3
 import time
 from functools import wraps
-from flask import Flask, request, session, redirect, render_template, jsonify, flash, abort
 
-import db as wallet_db
+from flask import (
+    Flask,
+    abort,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+)
+
 import controls
+import db as wallet_db
+
+
+# ---------------------------------------------------------------- configuration
+WALLET_MODE = os.environ.get("WALLET_MODE", "secure").strip().lower()
+SECURE_MODE = WALLET_MODE != "vulnerable"
+DEFAULT_DB = "wallet_secure.db" if SECURE_MODE else "wallet_vulnerable.db"
+
+
+def env_flag(name):
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 app = Flask(__name__)
 app.config.update(
-    DB=os.environ.get("WALLET_DB", "wallet.db"),
-    SECURE=os.environ.get("WALLET_MODE", "secure") != "vulnerable",
+    DB=os.environ.get("WALLET_DB", DEFAULT_DB),
+    SECURE=SECURE_MODE,
     SECRET_KEY=os.environ.get("WALLET_SECRET") or secrets.token_hex(32),
-    SESSION_COOKIE_SECURE=bool(os.environ.get("WALLET_HTTPS")),  # set when behind TLS
-    **controls.SESSION_SECURITY_CONFIG,  # C8: httponly/samesite/lifetime cookie policy
+    SESSION_COOKIE_SECURE=env_flag("WALLET_HTTPS"),
+    MAX_CONTENT_LENGTH=16 * 1024,
+    STEPUP_DEMO=not env_flag("WALLET_NO_STEPUP_DEMO"),
+    **controls.SESSION_SECURITY_CONFIG,
 )
 
+wallet_db.init_db(app)
 app.teardown_appcontext(wallet_db.close_db)
 
 
 @app.context_processor
 def inject_globals():
-    # Makes {{ secure }} available in every template without passing it explicitly.
     return {"secure": app.config["SECURE"]}
 
 
 # ---------------------------------------------------------------- helpers / guards
+
 def login_required(f):
     @wraps(f)
-    def w(*a, **k):
+    def wrapper(*args, **kwargs):
         if "uid" not in session:
             return redirect("/login")
-        return f(*a, **k)
-    return w
+        user = wallet_db.get_user_by_id(wallet_db.get_db(), session["uid"])
+        if user is None:
+            session.clear()
+            return redirect("/login")
+        return f(*args, **kwargs)
+
+    return wrapper
 
 
 def current_user():
-    return wallet_db.get_user_by_id(wallet_db.get_db(), session["uid"])
+    user = wallet_db.get_user_by_id(wallet_db.get_db(), session["uid"])
+    if user is None:
+        session.clear()
+        abort(401)
+    return user
 
 
 def authorize_owner(uid):
-    # C3: object-level authorisation - you may only read YOUR OWN wallet
     if app.config["SECURE"] and not controls.is_owner(session["uid"], uid):
-        wallet_db.audit(wallet_db.get_db(), session["uid"], "ACCESS_DENIED", f"tried wallet {uid}")
+        wallet_db.audit(
+            wallet_db.get_db(),
+            session["uid"],
+            "ACCESS_DENIED",
+            f"tried wallet {uid}",
+        )
         abort(403)
 
 
+# ---------------------------------------------------------------- request lifecycle security
 @app.before_request
 def csrf_protect():
-    # C6: every state-changing request from a logged-in user needs the per-session token
-    if app.config["SECURE"] and request.method == "POST" and "uid" in session:
+    """Require the per-session token on every authenticated POST request."""
+    if app.config["SECURE"] and request.method in {"POST", "PUT", "PATCH", "DELETE"} and "uid" in session:
         sent = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
         if not controls.csrf_token_valid(sent, session.get("csrf", "")):
-            wallet_db.audit(wallet_db.get_db(), session["uid"], "CSRF_REJECTED", request.path)
+            wallet_db.audit(
+                wallet_db.get_db(),
+                session["uid"],
+                "CSRF_REJECTED",
+                request.path,
+            )
             abort(400, "Invalid CSRF token")
 
 
 @app.after_request
-def apply_security_headers(r):
-    if app.config["SECURE"]:  # C9: reduce browser-side exposure
+def apply_security_headers(response):
+    if app.config["SECURE"]:
         for name, value in controls.SECURITY_HEADERS.items():
-            r.headers[name] = value
-    return r
+            response.headers[name] = value
+        if app.config["SESSION_COOKIE_SECURE"]:
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+@app.errorhandler(400)
+def err400(error):
+    return str(error.description or "Bad request."), 400
+
+
+@app.errorhandler(401)
+def err401(_error):
+    return "Authentication required.", 401
+
+
+@app.errorhandler(403)
+def err403(_error):
+    return "Forbidden.", 403
+
+
+@app.errorhandler(404)
+def err404(_error):
+    return "Not found.", 404
+
+
+@app.errorhandler(413)
+def err413(_error):
+    return "Request too large.", 413
 
 
 @app.errorhandler(500)
-def err500(_):  # C9: no stack traces / internals leaked to the user
+def err500(_error):
     return "Something went wrong.", 500
 
 
@@ -99,43 +167,61 @@ def index():
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
-        u, p, n = (request.form.get(k, "").strip() for k in ("username", "password", "full_name"))
-        ok, err = controls.validate_registration(u, p) if app.config["SECURE"] else (True, None)  # C4
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        full_name = request.form.get("full_name", "").strip()
+
+        if app.config["SECURE"]:
+            ok, error = controls.validate_registration(username, password, full_name)
+        else:
+            ok, error = True, None
+
         if not ok:
-            flash(err)
+            flash(error)
         else:
             try:
-                wallet_db.create_user(wallet_db.get_db(), u, p, n[:60])
+                wallet_db.create_user(
+                    wallet_db.get_db(),
+                    username,
+                    password,
+                    full_name[: controls.MAX_FULL_NAME_LEN],
+                )
                 flash("Account created. Please log in.")
                 return redirect("/login")
             except sqlite3.IntegrityError:
                 flash("Username unavailable.")
+
     return render_template("register.html")
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        u, p = request.form.get("username", ""), request.form.get("password", "")
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
         conn = wallet_db.get_db()
         user = None
+
         if not app.config["SECURE"]:
-            # VULN: injectable query + plaintext comparison, both live in db.py
-            user = wallet_db.get_user_by_credentials_unsafe(conn, u, p)
+            # VULN: injectable SQL and plaintext comparison for the before-test.
+            user = wallet_db.get_user_by_credentials_unsafe(conn, username, password)
         else:
-            row = wallet_db.get_user_by_username(conn, u)                         # C2: parameterised
-            if row and controls.is_account_locked(row):                          # C6
+            row = wallet_db.get_user_by_username(conn, username)
+            if row and controls.is_account_locked(row):
                 wallet_db.audit(conn, row["id"], "LOGIN_BLOCKED_LOCKED", "")
-            elif row and controls.verify_password(row["password"], p):           # C1
+            elif row and controls.verify_password(row["password"], password):
                 wallet_db.mark_login_success(conn, row["id"])
                 user = row
             elif row:
-                wallet_db.mark_login_failure(conn, row)                          # C6
+                wallet_db.mark_login_failure(conn, row)
+
         if user:
-            controls.rotate_session(session, user["id"])                        # C8
+            controls.rotate_session(session, user["id"])
             wallet_db.audit(conn, user["id"], "LOGIN_OK", "")
             return redirect("/dashboard")
-        flash("Invalid credentials or account temporarily locked.")  # C3-style generic message
+
+        flash("Invalid credentials or account temporarily locked.")
+
     return render_template("login.html")
 
 
@@ -149,122 +235,245 @@ def dashboard():
         user=me,
         other_user=other,
         csrf=session["csrf"],
-        is_admin=controls.is_admin(me),  # C10
+        session_timeout=controls.SESSION_IDLE_TIMEOUT,
+        is_admin=controls.is_admin(me),
     )
 
 
+# ---------------------------------------------------------------- beneficiary API
+@app.route("/api/beneficiaries", methods=["GET"])
+@login_required
+def api_beneficiaries():
+    rows = wallet_db.get_beneficiaries(wallet_db.get_db(), session["uid"])
+    return jsonify([dict(row) for row in rows])
+
+
+@app.route("/api/beneficiaries", methods=["POST"])
+@login_required
+def api_add_beneficiary():
+    payload = request.get_json(silent=True) or {}
+    username = str(payload.get("username", "")).strip()
+    conn = wallet_db.get_db()
+
+    if app.config["SECURE"]:
+        ok, message = controls.validate_beneficiary_username(username)
+        if not ok:
+            return jsonify(ok=False, message=message), 400
+
+    ok, message = wallet_db.add_beneficiary(conn, session["uid"], username)
+    if ok:
+        return jsonify(ok=True, message=message), 201
+    return jsonify(ok=False, message=message), 400
+
+
+@app.route("/api/beneficiaries/<int:beneficiary_id>", methods=["DELETE"])
+@login_required
+def api_remove_beneficiary(beneficiary_id):
+    valid, parsed_id = controls.validate_beneficiary_id(beneficiary_id)
+    if not valid:
+        return jsonify(ok=False, message="Invalid beneficiary id."), 400
+
+    conn = wallet_db.get_db()
+    ok, message = wallet_db.remove_beneficiary(conn, session["uid"], parsed_id)
+    if ok:
+        return jsonify(ok=True, message=message), 200
+
+    if app.config["SECURE"]:
+        wallet_db.audit(
+            conn,
+            session["uid"],
+            "BENEFICIARY_REMOVE_DENIED",
+            f"beneficiary_record={parsed_id}",
+        )
+    return jsonify(ok=False, message=message), 404
+
+
+# ---------------------------------------------------------------- transfer API
 @app.route("/api/transfer", methods=["POST"])
 @login_required
 def api_transfer():
-    d = request.get_json(silent=True) or {}
-    to, amount_str = str(d.get("to", "")), str(d.get("amount", ""))
+    payload = request.get_json(silent=True) or {}
+    to = str(payload.get("to", "")).strip()
+    amount_str = str(payload.get("amount", "")).strip()
     conn = wallet_db.get_db()
 
-    # C11: pause high-value transfers for a step-up code instead of executing
-    # immediately — mirrors the lecture's risk-based re-verification pattern.
     if app.config["SECURE"]:
-        ok, amt_or_msg = controls.validate_transfer_amount(amount_str)
-        if ok and controls.needs_step_up(amt_or_msg):
-            code = controls.generate_step_up_code()
-            session["stepup"] = {
-                "to": to,
-                "amount": amount_str,
-                "code": code,
-                "expires": time.time() + controls.STEP_UP_CODE_TTL,
-                "attempts": 0,
-            }
-            wallet_db.audit(conn, session["uid"], "STEP_UP_REQUIRED", f"to={to} amount={amount_str}")
-            return jsonify(
-                ok=False,
-                step_up_required=True,
-                message=f"Transfers of Rs. {controls.STEP_UP_THRESHOLD:,.0f}+ need a verification code.",
-                # DEMO ONLY: a real system sends this over a second channel
-                # (SMS/authenticator app) and never returns it in the API
-                # response. It's surfaced here only because this class
-                # project has no SMS/email provider to deliver it through.
-                demo_code=code,
-            ), 200
+        ok, amount_or_msg = controls.validate_transfer_amount(amount_str)
+        if not ok:
+            return jsonify(ok=False, message=amount_or_msg), 400
 
-    ok, msg = wallet_db.do_transfer(conn, current_user(), to, amount_str)
-    return jsonify(ok=ok, message=msg), (200 if ok else 400)
+        recipient_ok, recipient_msg = controls.validate_transfer_recipient(to)
+        if not recipient_ok:
+            return jsonify(ok=False, message=recipient_msg), 400
+
+        recipient = wallet_db.get_customer_by_username(conn, to)
+        if not recipient or recipient["id"] == session["uid"]:
+            return jsonify(ok=False, message="Invalid recipient."), 400
+
+        if controls.needs_step_up(amount_or_msg):
+            code = controls.generate_step_up_code()
+            challenge_id = controls.new_step_up_challenge_id()
+            expires_at = time.time() + controls.STEP_UP_CODE_TTL
+            digest = controls.step_up_code_digest(code, app.config["SECRET_KEY"])
+            wallet_db.create_step_up_challenge(
+                conn,
+                challenge_id,
+                session["uid"],
+                to,
+                amount_or_msg,
+                digest,
+                expires_at,
+            )
+            session["stepup_id"] = challenge_id
+            wallet_db.audit(
+                conn,
+                session["uid"],
+                "STEP_UP_REQUIRED",
+                f"to={recipient['id']} amount={amount_or_msg}",
+            )
+
+            response = {
+                "ok": True,
+                "step_up_required": True,
+                "message": (
+                    f"Transfers of Rs. {controls.STEP_UP_THRESHOLD:,.0f}+ "
+                    "need a verification code."
+                ),
+            }
+            # Classroom-only substitute for an SMS/authenticator channel.
+            # The raw code is NOT stored in the Flask client session.
+            if app.config["STEPUP_DEMO"]:
+                response["demo_code"] = code
+            return jsonify(**response), 200
+
+    ok, message = wallet_db.do_transfer(
+        conn,
+        current_user(),
+        to,
+        amount_str,
+    )
+    return jsonify(ok=ok, message=message), (200 if ok else 400)
 
 
 @app.route("/api/transfer/confirm", methods=["POST"])
 @login_required
 def api_transfer_confirm():
-    # C11: the pending transfer's to/amount come from the SERVER-HELD session,
-    # never from this request, so a correct code cannot be combined with a
-    # different amount than the one that was actually verified.
-    d = request.get_json(silent=True) or {}
-    entered_code = str(d.get("code", ""))
+    payload = request.get_json(silent=True) or {}
+    entered_code = str(payload.get("code", ""))
     conn = wallet_db.get_db()
-    pending = session.get("stepup")
+    challenge_id = session.get("stepup_id")
 
-    if not pending:
+    if not challenge_id:
         return jsonify(ok=False, message="No pending transfer to confirm."), 400
 
-    if not controls.step_up_code_valid(entered_code, pending["code"], pending["expires"]):
-        pending["attempts"] += 1
-        if pending["attempts"] >= controls.STEP_UP_MAX_ATTEMPTS:
-            session.pop("stepup", None)
-            wallet_db.audit(conn, session["uid"], "STEP_UP_FAILED", "max attempts exceeded, transfer voided")
-            return jsonify(ok=False, message="Too many incorrect codes. Transfer cancelled. Please try again."), 400
-        session["stepup"] = pending
-        wallet_db.audit(conn, session["uid"], "STEP_UP_FAILED", f"attempt {pending['attempts']}")
+    challenge = wallet_db.get_step_up_challenge(conn, challenge_id, session["uid"])
+    if not challenge:
+        session.pop("stepup_id", None)
+        return jsonify(ok=False, message="No pending transfer to confirm."), 400
+
+    if not controls.step_up_code_valid(
+        entered_code,
+        challenge["code_digest"],
+        challenge["expires_at"],
+        app.config["SECRET_KEY"],
+    ):
+        if time.time() > challenge["expires_at"]:
+            wallet_db.delete_step_up_challenge(conn, challenge_id)
+            session.pop("stepup_id", None)
+            wallet_db.audit(conn, session["uid"], "STEP_UP_FAILED", "expired code")
+            return jsonify(ok=False, message="Incorrect or expired code."), 400
+
+        attempts = wallet_db.increment_step_up_attempts(conn, challenge_id)
+        if attempts >= controls.STEP_UP_MAX_ATTEMPTS:
+            wallet_db.delete_step_up_challenge(conn, challenge_id)
+            session.pop("stepup_id", None)
+            wallet_db.audit(
+                conn,
+                session["uid"],
+                "STEP_UP_FAILED",
+                "max attempts exceeded, transfer voided",
+            )
+            return jsonify(
+                ok=False,
+                message="Too many incorrect codes. Transfer cancelled. Please try again.",
+            ), 400
+
+        wallet_db.audit(
+            conn,
+            session["uid"],
+            "STEP_UP_FAILED",
+            f"attempt {attempts}",
+        )
         return jsonify(ok=False, message="Incorrect or expired code."), 400
 
-    # Code verified: consume it (one-time use) and run the transfer with the
-    # step-up flag set. do_transfer refuses high-value transfers without it.
-    session.pop("stepup", None)
-    ok, msg = wallet_db.do_transfer(conn, current_user(), pending["to"], pending["amount"],
-                                    step_up_verified=True)
+    # Code is valid. Consume the server-side challenge before executing the
+    # transfer so it cannot be reused.
+    pending_to = challenge["recipient_username"]
+    pending_amount = challenge["amount_paisa"]
+    wallet_db.delete_step_up_challenge(conn, challenge_id)
+    session.pop("stepup_id", None)
 
-    # Log the outcome accurately: the code was valid, but the transfer itself
-    # may still fail (e.g. insufficient funds).
-    wallet_db.audit(conn, session["uid"],
-                    "STEP_UP_OK" if ok else "STEP_UP_VERIFIED_TRANSFER_FAILED",
-                    f"to={pending['to']} amount={pending['amount']}")
-    return jsonify(ok=ok, message=msg), (200 if ok else 400)
+    ok, message = wallet_db.do_transfer(
+        conn,
+        current_user(),
+        pending_to,
+        f"{pending_amount / 100:.2f}",
+        step_up_verified=True,
+    )
+    wallet_db.audit(
+        conn,
+        session["uid"],
+        "STEP_UP_OK" if ok else "STEP_UP_VERIFIED_TRANSFER_FAILED",
+        f"to={pending_to} amount={pending_amount}",
+    )
+    return jsonify(ok=ok, message=message), (200 if ok else 400)
 
 
+# ---------------------------------------------------------------- legacy form route kept for the before/after bypass demonstration
 @app.route("/transfer", methods=["POST"])
 @login_required
 def transfer():
-    ok, msg = wallet_db.do_transfer(wallet_db.get_db(), current_user(), request.form.get("to", ""), request.form.get("amount", ""))
-    flash(msg)
+    ok, message = wallet_db.do_transfer(
+        wallet_db.get_db(),
+        current_user(),
+        request.form.get("to", "").strip(),
+        request.form.get("amount", "").strip(),
+    )
+    flash(message)
     return redirect("/dashboard")
 
 
 @app.route("/logout", methods=["POST"])
+@login_required
 def logout():
-    if "uid" in session:
-        wallet_db.audit(wallet_db.get_db(), session["uid"], "LOGOUT", "")
+    uid = session["uid"]
+    wallet_db.audit(wallet_db.get_db(), uid, "LOGOUT", "")
     session.clear()
     return redirect("/login")
 
 
-# ---- JSON API (used to demonstrate broken access control) -------------------
+# ---------------------------------------------------------------- JSON APIs for balance / history
 @app.route("/api/wallet/<int:uid>/balance")
 @login_required
 def api_balance(uid):
-    authorize_owner(uid)   # VULN when removed/disabled: any user can read any balance
-    r = wallet_db.get_user_by_id(wallet_db.get_db(), uid)
-    return jsonify(username=r["username"], balance=r["balance"]) if r else abort(404)
+    authorize_owner(uid)
+    row = wallet_db.get_user_by_id(wallet_db.get_db(), uid)
+    return jsonify(username=row["username"], balance=row["balance"]) if row else abort(404)
 
 
 @app.route("/api/wallet/<int:uid>/transactions")
 @login_required
 def api_txs(uid):
     authorize_owner(uid)
-    return jsonify([dict(t) for t in wallet_db.get_history(wallet_db.get_db(), uid)])
+    return jsonify([dict(row) for row in wallet_db.get_history(wallet_db.get_db(), uid)])
 
 
-# ---- privileged operation: audit log (admin only) ---------------------------
+# ---------------------------------------------------------------- privileged operation
 @app.route("/admin/audit")
 @login_required
 def admin_audit():
     conn = wallet_db.get_db()
-    if app.config["SECURE"] and not controls.is_admin(current_user()):   # C10: role separation
+    if app.config["SECURE"] and not controls.is_admin(current_user()):
         wallet_db.audit(conn, session["uid"], "ACCESS_DENIED", "/admin/audit")
         abort(403)
     bad = wallet_db.verify_audit(conn)
@@ -273,5 +482,6 @@ def admin_audit():
 
 
 if __name__ == "__main__":
-    wallet_db.init_db(app)
-    app.run(debug=False, port=int(os.environ.get("WALLET_PORT", "5001")))   # never debug=True: exposes an interactive shell
+    # Secure mode is the default. Vulnerable mode is intentionally enabled
+    # only when WALLET_MODE=vulnerable is supplied for the assignment lab.
+    app.run(debug=False, port=int(os.environ.get("WALLET_PORT", "5001")))

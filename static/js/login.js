@@ -1,8 +1,8 @@
 const q = s => document.querySelector(s);
 
-function fill(u, p) {
-  q('[name=username]').value = u;
-  q('[name=password]').value = p;
+function fill(username, password) {
+  q('[name=username]').value = username;
+  q('[name=password]').value = password;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -11,13 +11,15 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   const sqliBtn = q('#fillSqli');
-  if (sqliBtn) sqliBtn.addEventListener('click', () => fill("ali' --", 'anything'));
+  if (sqliBtn) {
+    sqliBtn.addEventListener('click', () => fill("ali' --", 'anything'));
+  }
 
   const showPw = q('#showpw');
   if (showPw) {
-    showPw.addEventListener('click', () => {
-      const i = q('[name=password]');
-      i.type = i.type === 'password' ? 'text' : 'password';
+    showPw.addEventListener('change', () => {
+      const input = q('[name=password]');
+      input.type = showPw.checked ? 'text' : 'password';
     });
   }
 });

@@ -4,196 +4,436 @@ const ME_ID = Number(dashEl.dataset.uid);
 const ME = dashEl.dataset.uname;
 const OTHER = dashEl.dataset.otherUname;
 const OTHER_ID = Number(dashEl.dataset.otherUid);
+const SESSION_TIMEOUT = Number(dashEl.dataset.sessionTimeout) || 600;
 
-const $ = s => document.querySelector(s);
-let txs = [], filt = 'all', ttl = 600, bal = 0, shown = 0;
+const $ = selector => document.querySelector(selector);
+let txs = [];
+let filt = 'all';
+let ttl = SESSION_TIMEOUT;
+let bal = 0;
+let shown = 0;
+let beneficiaries = [];
 
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const rs = p => 'Rs. ' + (p / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
+}[c]));
 
-function toast(m, c = '') {
-  const d = document.createElement('div');
-  d.className = 'toast ' + c;
-  d.textContent = m;
-  $('#toasts').append(d);
-  setTimeout(() => d.remove(), 3500);
+const rs = paisa => 'Rs. ' + (paisa / 100).toLocaleString('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+
+function toast(message, type = '') {
+  const element = document.createElement('div');
+  element.className = `toast ${type}`;
+  element.textContent = message;
+  $('#toasts').append(element);
+  setTimeout(() => element.remove(), 3500);
 }
 
-async function api(url, o = {}) {
-  const h = {};
-  if (o.json) h['Content-Type'] = 'application/json';
-  if (o.method === 'POST' && o.csrf !== false) h['X-CSRF-Token'] = CSRF;
-  const r = await fetch(url, {
-    method: o.method || 'GET',
-    headers: h,
-    body: o.json ? JSON.stringify(o.json) : undefined,
-    credentials: 'same-origin',
-  });
-  if (r.redirected && r.url.includes('/login')) { location = '/login'; return { status: 401, ok: false }; }
-  let d = null;
-  try { d = await r.clone().json(); } catch (e) {}
-  if (r.ok) ttl = 600; // activity refreshes the session timeout
-  return { status: r.status, ok: r.ok, data: d };
+async function api(url, options = {}) {
+  try {
+    const method = options.method || 'GET';
+    const headers = {};
+    if (options.json) headers['Content-Type'] = 'application/json';
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && options.csrf !== false) {
+      headers['X-CSRF-Token'] = CSRF;
+    }
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: options.json ? JSON.stringify(options.json) : undefined,
+      credentials: 'same-origin',
+    });
+
+    if (response.redirected && response.url.includes('/login')) {
+      location = '/login';
+      return { status: 401, ok: false, data: null };
+    }
+
+    let data = null;
+    try {
+      data = await response.clone().json();
+    } catch (_) {
+      data = null;
+    }
+
+    if (response.ok) ttl = SESSION_TIMEOUT;
+    return { status: response.status, ok: response.ok, data };
+  } catch (error) {
+    return { status: 0, ok: false, data: { message: 'Network error.' } };
+  }
 }
 
-function countTo(v) {
-  const s = shown, t0 = performance.now();
-  bal = v;
-  (function f(t) {
-    const k = Math.min(1, (t - t0) / 600);
-    shown = s + (v - s) * k;
+function countTo(value) {
+  const start = shown;
+  const startedAt = performance.now();
+  bal = value;
+
+  (function animate(timestamp) {
+    const progress = Math.min(1, (timestamp - startedAt) / 600);
+    shown = start + (value - start) * progress;
     $('#bal').textContent = rs(Math.round(shown));
-    if (k < 1) requestAnimationFrame(f);
-  })(t0);
+    if (progress < 1) requestAnimationFrame(animate);
+  })(startedAt);
 }
 
 async function refresh() {
-  const b = await api(`/api/wallet/${ME_ID}/balance`);
-  if (b.ok) countTo(b.data.balance);
-  const t = await api(`/api/wallet/${ME_ID}/transactions`);
-  if (t.ok) { txs = t.data; render(); }
+  const [balanceResponse, historyResponse] = await Promise.all([
+    api(`/api/wallet/${ME_ID}/balance`),
+    api(`/api/wallet/${ME_ID}/transactions`),
+  ]);
+
+  if (balanceResponse.ok) countTo(balanceResponse.data.balance);
+  if (historyResponse.ok) {
+    txs = historyResponse.data;
+    render();
+  }
 }
 
-function setF(x, el) {
-  filt = x;
-  document.querySelectorAll('.f').forEach(b => b.classList.remove('on'));
-  el.classList.add('on');
+async function loadBeneficiaries() {
+  const response = await api('/api/beneficiaries');
+  if (!response.ok) return;
+
+  beneficiaries = Array.isArray(response.data) ? response.data : [];
+  renderBeneficiaries();
+}
+
+
+function renderBeneficiaries() {
+  const list = $('#beneficiaryList');
+  const quickList = $('#beneficiaryQuickList');
+
+  list.innerHTML = beneficiaries.map(beneficiary => (
+    `<div class="beneficiary-row">` +
+      `<button type="button" class="beneficiary-select ghost" data-username="${esc(beneficiary.username)}">` +
+        `<span><b>${esc(beneficiary.username)}</b> <span class="mut">${esc(beneficiary.full_name)}</span></span>` +
+      `</button>` +
+      `<button type="button" class="ghost beneficiary-remove" data-id="${beneficiary.id}" aria-label="Remove ${esc(beneficiary.username)}">Remove</button>` +
+    `</div>`
+  )).join('');
+
+  quickList.innerHTML = beneficiaries.map(beneficiary => (
+    `<button type="button" class="ghost quick-beneficiary" data-username="${esc(beneficiary.username)}">${esc(beneficiary.username)}</button>`
+  )).join('');
+
+  $('#beneficiaryEmpty').textContent = beneficiaries.length ? '' : 'No beneficiaries saved yet.';
+
+  document.querySelectorAll('.beneficiary-select, .quick-beneficiary').forEach(button => {
+    button.addEventListener('click', () => {
+      $('#to').value = button.dataset.username;
+      $('#to').focus();
+      toast(`Recipient selected: ${button.dataset.username}`, 'ok');
+    });
+  });
+
+  document.querySelectorAll('.beneficiary-remove').forEach(button => {
+    button.addEventListener('click', () => removeBeneficiary(Number(button.dataset.id)));
+  });
+}
+
+
+async function addBeneficiary() {
+  const username = $('#beneficiaryUsername').value.trim();
+  if (!username) {
+    toast('Enter a beneficiary username.', 'err');
+    return;
+  }
+
+  $('#addBeneficiary').disabled = true;
+  const response = await api('/api/beneficiaries', {
+    method: 'POST',
+    json: { username },
+  });
+  $('#addBeneficiary').disabled = false;
+
+  toast(
+    (response.data && response.data.message) || `Request failed (HTTP ${response.status})`,
+    response.ok ? 'ok' : 'err'
+  );
+
+  if (response.ok) {
+    $('#beneficiaryUsername').value = '';
+    await loadBeneficiaries();
+  }
+}
+
+
+async function removeBeneficiary(id) {
+  const beneficiary = beneficiaries.find(item => item.id === id);
+  if (!beneficiary) return;
+
+  if (!confirm(`Remove ${beneficiary.username} from your beneficiaries?`)) return;
+
+  const response = await api(`/api/beneficiaries/${id}`, {
+    method: 'DELETE',
+  });
+
+  toast(
+    (response.data && response.data.message) || `Request failed (HTTP ${response.status})`,
+    response.ok ? 'ok' : 'err'
+  );
+
+  if (response.ok) await loadBeneficiaries();
+}
+
+
+function setFilter(filter, element) {
+  filt = filter;
+  document.querySelectorAll('.f').forEach(button => button.classList.remove('on'));
+  element.classList.add('on');
   render();
 }
 
-function tab(x) {
-  $('#wal').hidden = x !== 'w';
-  $('#lab').hidden = x !== 'l';
-  $('#tw').className = x === 'w' ? 'on' : 'ghost';
-  $('#tl').className = x === 'l' ? 'on' : 'ghost';
+function tab(value) {
+  $('#wal').hidden = value !== 'w';
+  $('#lab').hidden = value !== 'l';
+  $('#tw').className = value === 'w' ? 'on' : 'ghost';
+  $('#tl').className = value === 'l' ? 'on' : 'ghost';
 }
 
 function render() {
-  const q = $('#q').value.toLowerCase();
-  const rows = txs.filter(t => {
-    const out = t.sender_id === ME_ID;
-    if (filt === 'sent' && !out) return false;
-    if (filt === 'recv' && out) return false;
-    if (filt === 'failed' && t.status !== 'FAILED') return false;
-    return !q || ((t.sname || '') + ' ' + (t.rname || '')).toLowerCase().includes(q);
+  const query = $('#q').value.toLowerCase();
+  const rows = txs.filter(transaction => {
+    const outgoing = transaction.sender_id === ME_ID;
+    if (filt === 'sent' && !outgoing) return false;
+    if (filt === 'recv' && outgoing) return false;
+    if (filt === 'failed' && transaction.status !== 'FAILED') return false;
+
+    const people = `${transaction.sname || ''} ${transaction.rname || ''}`.toLowerCase();
+    return !query || people.includes(query);
   });
-  $('#rows').innerHTML = rows.map(t => {
-    const out = t.sender_id === ME_ID;
-    return `<tr><td>${t.id}</td><td>${esc(t.sname)}</td><td>${esc(t.rname)}</td>` +
-      `<td class="${out ? 'neg' : 'pos'}">${out ? '−' : '+'}${rs(t.amount)}</td>` +
-      `<td><span class="chip s-${esc(t.status)}">${esc(t.status)}</span></td>` +
-      `<td class="mut">${esc(String(t.created_at).replace('T', ' ').slice(0, 19))}</td></tr>`;
+
+  $('#rows').innerHTML = rows.map(transaction => {
+    const outgoing = transaction.sender_id === ME_ID;
+    const amountClass = outgoing ? 'neg' : 'pos';
+    const sign = outgoing ? '-' : '+';
+    const created = String(transaction.created_at).replace('T', ' ').slice(0, 19);
+
+    return `<tr>` +
+      `<td>${transaction.id}</td>` +
+      `<td>${esc(transaction.sname)}</td>` +
+      `<td>${esc(transaction.rname || '-')}</td>` +
+      `<td class="${amountClass}">${sign}${rs(transaction.amount)}</td>` +
+      `<td><span class="chip s-${esc(transaction.status)}">${esc(transaction.status)}</span></td>` +
+      `<td class="mut">${esc(created)}</td>` +
+      `</tr>`;
   }).join('');
+
   $('#empty').textContent = rows.length ? '' : 'No transactions to show.';
 }
 
 function hint() {
-  const v = $('#amt').value.trim(), h = $('#hint');
-  if (!v) { h.textContent = ''; return; }
-  const n = Number(v);
-  let m = 'Looks good ✓', c = 'var(--ok)'; // UX only - the server re-validates everything
-  if (!isFinite(n) || n <= 0) { m = 'Enter a positive amount'; c = 'var(--bad)'; }
-  else if (!/^\d+(\.\d{1,2})?$/.test(v)) { m = 'Maximum 2 decimal places'; c = 'var(--bad)'; }
-  else if (n > 100000) { m = 'Limit is Rs. 100,000 per transfer'; c = 'var(--bad)'; }
-  else if (n * 100 > bal) { m = 'More than your balance'; c = 'var(--warn)'; }
-  h.style.color = c;
-  h.textContent = m;
+  const value = $('#amt').value.trim();
+  const element = $('#hint');
+  element.className = 'mut hint';
+
+  if (!value) {
+    element.textContent = '';
+    return;
+  }
+
+  const number = Number(value);
+  let message = 'Looks good.';
+  let className = 'good-text';
+
+  if (!Number.isFinite(number) || number <= 0) {
+    message = 'Enter a positive amount.';
+    className = 'bad-text';
+  } else if (!/^\d+(\.\d{1,2})?$/.test(value)) {
+    message = 'Use at most 2 decimal places.';
+    className = 'bad-text';
+  } else if (number > 100000) {
+    message = 'Limit is Rs. 100,000 per transfer.';
+    className = 'bad-text';
+  } else if (number * 100 > bal) {
+    message = 'Amount is greater than your balance.';
+    className = 'warn-text';
+  }
+
+  element.classList.add(className);
+  element.textContent = message;
 }
 
 async function send() {
-  const to = $('#to').value.trim(), amount = $('#amt').value.trim();
-  if (!to || !amount) { toast('Enter recipient and amount', 'err'); return; }
+  const to = $('#to').value.trim();
+  const amount = $('#amt').value.trim();
+
+  if (!to || !amount) {
+    toast('Enter recipient and amount.', 'err');
+    return;
+  }
+
   if (!confirm(`Send Rs. ${amount} to ${to}?`)) return;
+
   $('#send').disabled = true;
-  const r = await api('/api/transfer', { method: 'POST', json: { to, amount } });
+  const response = await api('/api/transfer', {
+    method: 'POST',
+    json: { to, amount },
+  });
 
-  if (r.ok && r.data && r.data.step_up_required) {
-    // C11: high-value transfer paused for a one-time code before it executes.
-    // demo_code is shown here only because this class project has no real
-    // SMS/email channel — a real system would never return it to the client.
-    const hint = r.data.demo_code ? ` (demo code: ${r.data.demo_code})` : '';
-    const entered = prompt(r.data.message + hint + '\n\nEnter the verification code:');
+  if (response.ok && response.data && response.data.step_up_required) {
+    const demoCode = response.data.demo_code ? `\n\nDemo code: ${response.data.demo_code}` : '';
+    const entered = prompt(`${response.data.message}${demoCode}\n\nEnter the verification code:`);
+
+    if (entered === null) {
+      $('#send').disabled = false;
+      toast('Transfer cancelled.', 'err');
+      return;
+    }
+
+    const confirmation = await api('/api/transfer/confirm', {
+      method: 'POST',
+      json: { code: entered },
+    });
+
+    toast(
+      (confirmation.data && confirmation.data.message) || `Request failed (HTTP ${confirmation.status})`,
+      confirmation.ok ? 'ok' : 'err'
+    );
+
+    if (confirmation.ok) {
+      $('#to').value = '';
+      $('#amt').value = '';
+      hint();
+    }
+
     $('#send').disabled = false;
-    if (entered === null) { toast('Transfer cancelled.', 'err'); refresh(); return; }
-
-    const confirmResult = await api('/api/transfer/confirm', { method: 'POST', json: { code: entered } });
-    toast((confirmResult.data && confirmResult.data.message) || ('Request failed (HTTP ' + confirmResult.status + ')'), confirmResult.ok ? 'ok' : 'err');
-    if (confirmResult.ok) { $('#to').value = ''; $('#amt').value = ''; hint(); }
     refresh();
     return;
   }
 
   $('#send').disabled = false;
-  toast((r.data && r.data.message) || ('Request failed (HTTP ' + r.status + ')'), r.ok ? 'ok' : 'err');
-  if (r.ok) { $('#to').value = ''; $('#amt').value = ''; hint(); }
+  toast(
+    (response.data && response.data.message) || `Request failed (HTTP ${response.status})`,
+    response.ok ? 'ok' : 'err'
+  );
+
+  if (response.ok) {
+    $('#to').value = '';
+    $('#amt').value = '';
+    hint();
+  }
   refresh();
 }
 
-// ---- Security Lab: real attack requests, verdict shown per attack ----
-const ATK = [
-  ['W3', "Read another user's balance (IDOR)", () => api(`/api/wallet/${OTHER_ID}/balance`)],
-  ['W4', 'Send a NEGATIVE amount (reverse the money flow)', () => api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '-5000' } })],
-  ['W4', 'Overdraft: send more than the balance', () => api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '99999' } })],
-  ['W5', 'Forged transfer with NO CSRF token', () => api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '100' }, csrf: false })],
-  ['W8', 'Open the admin audit log as a normal user', () => api('/admin/audit')],
-  ['C11', 'Confirm a high-value transfer with a guessed code (no step-up was ever issued)', () => api('/api/transfer/confirm', { method: 'POST', json: { code: '000000' } })],
-  ['W13', 'Bypass step-up: send 15,000 via the old /transfer route', async () => {
-  const before = (await api(`/api/wallet/${ME_ID}/balance`)).data.balance;
-  await fetch('/transfer', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-    body: new URLSearchParams({to: OTHER, amount: '15000', csrf_token: CSRF}),
-    credentials: 'same-origin'
-  });
-  const after = (await api(`/api/wallet/${ME_ID}/balance`)).data.balance;
-  const moved = after < before;
-  return {status: 200, ok: moved,
-          data: {message: moved ? 'Money moved without a code!' : 'Balance unchanged, step-up enforced'}};
-}],
+// Security Lab: real attack requests. They should fail in secure mode.
+const ATTACKS = [
+  ['W3', "Read another user's balance (IDOR)", () =>
+    api(`/api/wallet/${OTHER_ID}/balance`)],
+
+  ['W4', 'Send a NEGATIVE amount', () =>
+    api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '-5000' } })],
+
+  ['W4', 'Overdraft: send more than the balance', () =>
+    api('/api/transfer', { method: 'POST', json: { to: OTHER, amount: '99999' } })],
+
+  ['W5', 'Forged transfer with NO CSRF token', () =>
+    api('/api/transfer', {
+      method: 'POST',
+      json: { to: OTHER, amount: '100' },
+      csrf: false,
+    })],
+
+  ['W8', 'Open the admin audit log as a normal user', () =>
+    api('/admin/audit')],
+
+  ['C12', 'Confirm a high-value transfer with a guessed code', () =>
+    api('/api/transfer/confirm', {
+      method: 'POST',
+      json: { code: '000000' },
+    })],
+
+  ['C12', 'Bypass step-up through the legacy /transfer route', async () => {
+    const before = await api(`/api/wallet/${ME_ID}/balance`);
+    if (!before.ok) return before;
+
+    const beforeBalance = before.data.balance;
+    await fetch('/transfer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        to: OTHER,
+        amount: '15000',
+        csrf_token: CSRF,
+      }),
+      credentials: 'same-origin',
+    });
+
+    const after = await api(`/api/wallet/${ME_ID}/balance`);
+    const moved = after.ok && after.data.balance < beforeBalance;
+    return {
+      status: 200,
+      ok: moved,
+      data: { message: moved ? 'Money moved without a code.' : 'Balance unchanged; step-up enforced.' },
+    };
+  }],
 ];
 
-async function runAtk(i) {
-  const r = await ATK[i][2]();
-  const bad = r.ok;
-  const el = $('#r' + i);
-  let extra = r.data && r.data.message ? ' · ' + esc(r.data.message) : '';
-  if (r.data && r.data.balance !== undefined) extra = ' · leaked ' + esc(r.data.username) + "'s balance: " + rs(r.data.balance);
-  el.innerHTML = (bad ? '❌ SUCCEEDED' : '✅ BLOCKED') + ' — HTTP ' + r.status + extra;
-  el.style.color = bad ? 'var(--bad)' : 'var(--ok)';
+async function runAttack(index) {
+  const response = await ATTACKS[index][2]();
+  const succeeded = response.ok;
+  const resultElement = $(`#r${index}`);
+  let extra = response.data && response.data.message ? ` - ${esc(response.data.message)}` : '';
+
+  if (response.data && response.data.balance !== undefined) {
+    extra = ` - leaked ${esc(response.data.username)}'s balance: ${rs(response.data.balance)}`;
+  }
+
+  resultElement.className = `mut attack-result ${succeeded ? 'attack-failed' : 'attack-blocked'}`;
+  resultElement.textContent = `${succeeded ? 'ATTACK SUCCEEDED' : 'ATTACK BLOCKED'} - HTTP ${response.status}${extra}`;
   refresh();
 }
 
 async function runAll() {
-  for (let i = 0; i < ATK.length; i++) await runAtk(i);
+  for (let index = 0; index < ATTACKS.length; index += 1) {
+    await runAttack(index);
+  }
 }
 
 function buildAttackList() {
   const container = $('#atk');
   container.innerHTML = '';
-  ATK.forEach((a, i) => {
+
+  ATTACKS.forEach((attack, index) => {
     const row = document.createElement('div');
     row.className = 'atk';
+
     const left = document.createElement('div');
-    left.innerHTML = `<b>${esc(a[0])}</b> · ${esc(a[1])}<div class="mut" id="r${i}"></div>`;
-    const btn = document.createElement('button');
-    btn.className = 'ghost';
-    btn.textContent = 'Run';
-    btn.addEventListener('click', () => runAtk(i));
-    row.append(left, btn);
+    left.innerHTML = `<b>${esc(attack[0])}</b> - ${esc(attack[1])}<div class="mut attack-result" id="r${index}"></div>`;
+
+    const button = document.createElement('button');
+    button.className = 'ghost';
+    button.type = 'button';
+    button.textContent = 'Run';
+    button.addEventListener('click', () => runAttack(index));
+
+    row.append(left, button);
     container.append(row);
   });
 }
 
 function wireEvents() {
-  document.querySelectorAll('[data-tab]').forEach(btn => {
-    btn.addEventListener('click', () => tab(btn.dataset.tab));
+  document.querySelectorAll('[data-tab]').forEach(button => {
+    button.addEventListener('click', () => tab(button.dataset.tab));
   });
-  document.querySelectorAll('[data-filter]').forEach(btn => {
-    btn.addEventListener('click', () => setF(btn.dataset.filter, btn));
+
+  document.querySelectorAll('[data-filter]').forEach(button => {
+    button.addEventListener('click', () => setFilter(button.dataset.filter, button));
   });
+
   $('#amt').addEventListener('input', hint);
   $('#q').addEventListener('input', render);
   $('#send').addEventListener('click', send);
+  $('#addBeneficiary').addEventListener('click', addBeneficiary);
+  $('#beneficiaryUsername').addEventListener('keydown', event => {
+    if (event.key === 'Enter') addBeneficiary();
+  });
   $('#runAllBtn').addEventListener('click', runAll);
 }
 
@@ -201,10 +441,16 @@ $('#nm').textContent = ME;
 buildAttackList();
 wireEvents();
 refresh();
+loadBeneficiaries();
+
 setInterval(() => {
-  ttl--;
-  if (ttl <= 0) { location = '/login'; return; }
-  const t = $('#timer');
-  t.textContent = String(Math.floor(ttl / 60)).padStart(2, '0') + ':' + String(ttl % 60).padStart(2, '0');
-  t.style.color = ttl < 60 ? 'var(--bad)' : '';
+  ttl -= 1;
+  if (ttl <= 0) {
+    location = '/login';
+    return;
+  }
+
+  const timer = $('#timer');
+  timer.textContent = `${String(Math.floor(ttl / 60)).padStart(2, '0')}:${String(ttl % 60).padStart(2, '0')}`;
+  timer.classList.toggle('timer-critical', ttl < 60);
 }, 1000);

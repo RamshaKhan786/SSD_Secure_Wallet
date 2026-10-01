@@ -1,78 +1,109 @@
 {% extends "base.html" %}
-{% block title %}Dashboard · Mini Wallet{% endblock %}
+{% block title %}Dashboard - Mini Wallet{% endblock %}
 {% block content %}
 <div id="dash"
      data-csrf="{{ csrf }}"
      data-uid="{{ user.id }}"
      data-uname="{{ user.username }}"
      data-other-uname="{{ other_user.username }}"
-     data-other-uid="{{ other_user.id }}">
+     data-other-uid="{{ other_user.id }}"
+     data-session-timeout="{{ session_timeout }}">
 
   <header>
-    <h1>💳 Mini Wallet
-      <span class="badge {{ 'b-sec' if secure else 'b-vul' }}">{{ 'SECURE MODE' if secure else 'VULNERABLE MODE' }}</span>
+    <h1>Mini Wallet
+      <span class="badge {{ 'b-sec' if secure else 'b-vul' }}">
+        {{ 'SECURE MODE' if secure else 'VULNERABLE MODE' }}
+      </span>
     </h1>
-    <div>
+
+    <div class="header-actions">
       <span class="mut">Session expires in <b id="timer">10:00</b></span>
       {% if is_admin or not secure %}
-        <a href="/admin/audit"><button class="ghost" type="button">Audit log</button></a>
+        <a class="button-link ghost" href="/admin/audit">Audit log</a>
       {% endif %}
-      <form method="post" action="/logout" style="display:inline">
+      <form method="post" action="/logout" class="inline-form">
         <input type="hidden" name="csrf_token" value="{{ csrf }}">
-        <button class="ghost">Log out</button>
+        <button class="ghost" type="submit">Log out</button>
       </form>
     </div>
   </header>
 
   <div class="tabs">
-    <button id="tw" class="on" data-tab="w">Wallet</button>
-    <button id="tl" class="ghost" data-tab="l">🛡 Security Lab</button>
-  </div><br>
+    <button id="tw" type="button" class="on" data-tab="w">Wallet</button>
+    <button id="tl" type="button" class="ghost" data-tab="l">Security Lab</button>
+  </div>
 
-  <div id="wal">
+  <section id="wal">
     <div class="grid">
       <div class="card">
         <div class="mut">Welcome, <b id="nm"></b></div>
-        <div class="mut">Available balance</div>
-        <div class="bal" id="bal">—</div>
+        <div class="mut balance-label">Available balance</div>
+        <div class="bal" id="bal" aria-live="polite">-</div>
       </div>
+
       <div class="card">
-        <h3 style="margin:0">Send money</h3>
+        <h3>Send money</h3>
+        <label for="to">Recipient</label>
         <input id="to" placeholder="Recipient username" autocomplete="off">
-        <input id="amt" placeholder="Amount (Rs.)" inputmode="decimal">
-        <div class="mut" id="hint" style="min-height:20px"></div>
-        <button id="send">Send</button>
-      </div>
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;align-items:center">
-          <h3 style="margin:0">Transactions</h3>
-          <div>
-            <button class="ghost f on" data-filter="all">All</button>
-            <button class="ghost f" data-filter="sent">Sent</button>
-            <button class="ghost f" data-filter="recv">Received</button>
-            <button class="ghost f" data-filter="failed">Failed</button>
-          </div>
-          <input id="q" placeholder="Search name…" style="max-width:180px">
+        <div class="beneficiary-picker" id="beneficiaryPicker">
+          <span class="mut">Or select a saved beneficiary:</span>
+          <div id="beneficiaryQuickList" class="quick-beneficiaries"></div>
         </div>
-        <table>
-          <thead><tr><th>#</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Time (UTC)</th></tr></thead>
-          <tbody id="rows"></tbody>
-        </table>
+        <label for="amt">Amount</label>
+        <input id="amt" placeholder="Amount (Rs.)" inputmode="decimal">
+        <div class="mut hint" id="hint" aria-live="polite"></div>
+        <button id="send" type="button">Send</button>
+        <p class="mut lab-note">Transfers of Rs. 10,000 or more require step-up verification.</p>
+      </div>
+
+      <div class="card">
+        <h3>Beneficiaries</h3>
+        <p class="mut">Save registered customer accounts for quicker future transfers.</p>
+        <div class="beneficiary-add">
+          <label for="beneficiaryUsername">Username</label>
+          <input id="beneficiaryUsername" placeholder="e.g. sara" autocomplete="off">
+          <button id="addBeneficiary" type="button">Add beneficiary</button>
+        </div>
+        <div id="beneficiaryList" class="beneficiary-list" aria-live="polite"></div>
+        <div id="beneficiaryEmpty" class="mut"></div>
+      </div>
+
+      <div class="card card-wide">
+        <div class="section-head">
+          <h3>Transactions</h3>
+          <div class="filter-group">
+            <button class="ghost f on" type="button" data-filter="all">All</button>
+            <button class="ghost f" type="button" data-filter="sent">Sent</button>
+            <button class="ghost f" type="button" data-filter="recv">Received</button>
+            <button class="ghost f" type="button" data-filter="failed">Failed</button>
+          </div>
+          <input id="q" class="search" placeholder="Search name..." aria-label="Search transactions">
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Time (UTC)</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
         <div class="mut" id="empty"></div>
       </div>
     </div>
-  </div>
+  </section>
 
-  <div id="lab" hidden>
+  <section id="lab" hidden>
     <div class="card">
-      <h3 style="margin:0 0 6px">Security Lab</h3>
-      <div class="mut">Each button performs a real attack request from your logged-in browser. In <b>VULNERABLE</b>
-        mode they succeed (❌); in <b>SECURE</b> mode they are blocked (✅). Use it for the before/after demo.</div>
-      <div id="atk"></div><br>
-      <button id="runAllBtn">Run all attacks</button>
+      <h3>Security Lab</h3>
+      <p class="mut">
+        These controls issue local demo requests that correspond to weaknesses identified for the assignment.
+        In vulnerable mode the weaknesses are intentionally exposed; in secure mode the same requests should be blocked.
+      </p>
+      <div id="atk"></div>
+      <button id="runAllBtn" type="button" class="full-width">Run all attacks</button>
     </div>
-  </div>
-  <div id="toasts"></div>
+  </section>
+
+  <div id="toasts" aria-live="polite"></div>
 </div>
 {% endblock %}
 {% block scripts %}

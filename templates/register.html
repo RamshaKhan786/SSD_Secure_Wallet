@@ -1,20 +1,31 @@
 {% extends "base.html" %}
-{% block title %}Create account · Mini Wallet{% endblock %}
+{% block title %}Create account - Mini Wallet{% endblock %}
 {% block content %}
 <div class="center card">
   <h1>Create account
-    <span class="badge {{ 'b-sec' if secure else 'b-vul' }}">{{ 'SECURE MODE' if secure else 'VULNERABLE MODE' }}</span>
+    <span class="badge {{ 'b-sec' if secure else 'b-vul' }}">
+      {{ 'SECURE MODE' if secure else 'VULNERABLE MODE' }}
+    </span>
   </h1>
-  <form method="post">
-    <input name="username" placeholder="Username (a-z, 0-9, _)" autocomplete="off">
-    <input name="full_name" placeholder="Full name">
-    <input name="password" id="pw" type="password" placeholder="Password (min 8)">
-    <div style="height:6px;background:#334155;border-radius:4px">
-      <div id="fill" style="height:6px;width:0;border-radius:4px;transition:.3s"></div>
+
+  <form method="post" class="form-stack">
+    <label for="username">Username</label>
+    <input id="username" name="username" placeholder="Username (a-z, 0-9, _)" maxlength="20" autocomplete="off" required>
+
+    <label for="full_name">Full name</label>
+    <input id="full_name" name="full_name" placeholder="Full name" maxlength="60" required>
+
+    <label for="pw">Password</label>
+    <input id="pw" name="password" type="password" placeholder="Password (min 8)" maxlength="128" required>
+
+    <div class="meter" aria-hidden="true">
+      <div id="fill" class="meter-fill score-0"></div>
     </div>
-    <div class="mut" id="lbl">&nbsp;</div>
-    <button style="width:100%;margin-top:8px">Create account</button>
+    <div class="mut" id="lbl"></div>
+
+    <button class="full-width" type="submit">Create account</button>
   </form>
+
   <p class="mut">Have an account? <a href="/login">Log in</a></p>
 </div>
 {% endblock %}

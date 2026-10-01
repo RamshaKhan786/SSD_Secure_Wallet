@@ -8,7 +8,9 @@
 </head>
 <body>
   <div class="wrap">
-    {% for m in get_flashed_messages() %}<div class="msg">{{ m }}</div>{% endfor %}
+    {% for m in get_flashed_messages() %}
+      <div class="msg" role="alert">{{ m }}</div>
+    {% endfor %}
     {% block content %}{% endblock %}
   </div>
   {% block scripts %}{% endblock %}

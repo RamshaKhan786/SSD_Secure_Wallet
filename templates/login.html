@@ -1,23 +1,34 @@
 {% extends "base.html" %}
-{% block title %}Log in · Mini Wallet{% endblock %}
+{% block title %}Log in - Mini Wallet{% endblock %}
 {% block content %}
 <div class="center card">
-  <h1>💳 Mini Wallet
-    <span class="badge {{ 'b-sec' if secure else 'b-vul' }}">{{ 'SECURE MODE' if secure else 'VULNERABLE MODE' }}</span>
+  <h1>Mini Wallet
+    <span class="badge {{ 'b-sec' if secure else 'b-vul' }}">
+      {{ 'SECURE MODE' if secure else 'VULNERABLE MODE' }}
+    </span>
   </h1>
-  <form method="post">
-    <input name="username" placeholder="Username" autofocus autocomplete="username">
-    <input name="password" type="password" placeholder="Password" autocomplete="current-password">
-    <label class="mut"><input type="checkbox" id="showpw" style="width:auto"> Show password</label>
-    <button style="width:100%;margin-top:8px">Log in</button>
+
+  <form method="post" class="form-stack">
+    <label for="username">Username</label>
+    <input id="username" name="username" placeholder="Username" autofocus autocomplete="username" required>
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <label class="mut checkbox-row"><input type="checkbox" id="showpw"> Show password</label>
+
+    <button class="full-width" type="submit">Log in</button>
   </form>
+
   <p class="mut">No account? <a href="/register">Register</a></p>
-  <hr style="border-color:#334155">
-  <p class="mut">Demo shortcuts (click to fill the form)</p>
+
+  <hr>
+  <p class="mut">Demo shortcuts</p>
   <button class="ghost" type="button" data-fill-user="ali" data-fill-pass="Ali@12345">ali</button>
   <button class="ghost" type="button" data-fill-user="sara" data-fill-pass="Sara@12345">sara</button>
   <button class="ghost" type="button" data-fill-user="admin" data-fill-pass="Admin@12345">admin</button>
-  <button class="ghost" type="button" id="fillSqli">⚠ SQL-injection payload</button>
+  <button class="ghost" type="button" id="fillSqli">Demo: SQL-injection payload</button>
+
+  <p class="mut lab-note">The SQL-injection button is only for the assignment's vulnerable-vs-secure demonstration.</p>
 </div>
 {% endblock %}
 {% block scripts %}

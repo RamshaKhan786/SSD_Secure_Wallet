@@ -5,6 +5,7 @@
      data-csrf="{{ csrf }}"
      data-uid="{{ user.id }}"
      data-uname="{{ user.username }}"
+     data-cnic="{{ masked_cnic }}"
      data-other-uname="{{ other_user.username }}"
      data-other-uid="{{ other_user.id }}"
      data-session-timeout="{{ session_timeout }}">
@@ -37,6 +38,7 @@
     <div class="grid">
       <div class="card">
         <div class="mut">Welcome, <b id="nm"></b></div>
+        <div class="mut">CNIC: <span id="cnic"></span></div>
         <div class="mut balance-label">Available balance</div>
         <div class="bal" id="bal" aria-live="polite">-</div>
       </div>

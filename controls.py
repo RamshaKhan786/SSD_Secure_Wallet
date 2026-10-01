@@ -28,7 +28,8 @@ import re
 import secrets
 import time
 from decimal import Decimal, InvalidOperation
-
+from cryptography.fernet import Fernet, InvalidToken
+import base64
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # ---- policy constants -------------------------------------------------
@@ -43,7 +44,9 @@ STEP_UP_THRESHOLD = Decimal("10000")      # Rs. 10,000 and above
 STEP_UP_CODE_TTL = 120                    # seconds
 STEP_UP_MAX_ATTEMPTS = 3
 SESSION_IDLE_TIMEOUT = 600                # 10 minutes
-
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+CNIC_PATTERN = re.compile(r"^\d{5}-\d{7}-\d{1}$")
+PASSWORD_PATTERN = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^\w\s]).{8,}$")
 
 # ---------------------------------------------------------------- C1: password hashing
 
@@ -73,21 +76,18 @@ def is_admin(user):
 
 # ---------------------------------------------------------------- C6: server-side validation
 
-def validate_registration(username, password, full_name):
-    """Return (ok, error_message_or_None). This is the real validation gate."""
-    username = (username or "").strip()
-    full_name = (full_name or "").strip()
-
+def validate_registration(username, password, full_name, email, cnic):
     if not USERNAME_PATTERN.fullmatch(username):
-        return False, "Username must be 3-20 characters using lowercase letters, numbers, or _."
+        return False, "Username: 3-20 chars [a-z0-9_]."
     if not full_name or len(full_name) > MAX_FULL_NAME_LEN:
         return False, f"Full name is required and must be at most {MAX_FULL_NAME_LEN} characters."
-    if len(password or "") < MIN_PASSWORD_LEN:
-        return False, f"Password must be at least {MIN_PASSWORD_LEN} characters."
-    if len(password or "") > MAX_PASSWORD_LEN:
-        return False, f"Password must not exceed {MAX_PASSWORD_LEN} characters."
+    if not PASSWORD_PATTERN.fullmatch(password):
+        return False, "Password must be 8+ chars with upper, lower, digit, and special char."
+    if not EMAIL_PATTERN.fullmatch(email):
+        return False, "Enter a valid email address."
+    if not CNIC_PATTERN.fullmatch(cnic):
+        return False, "CNIC must be in the format 12345-1234567-1."
     return True, None
-
 
 def validate_transfer_recipient(username):
     """Validate a recipient identifier before it is used by the transfer logic."""
@@ -248,3 +248,27 @@ def step_up_code_valid(entered_code, expected_digest, expires_at, secret_key):
         return False
     actual = step_up_code_digest(entered_code, secret_key)
     return secrets.compare_digest(actual, expected_digest or "")
+
+#---------------------------------------------------------------- C13: CINC encryption
+def _fernet_key_from_secret(secret_key):
+    """Derive a valid 32-byte urlsafe-base64 Fernet key from the app's SECRET_KEY,
+    so we don't need to manage a second separate secret."""
+    digest = hashlib.sha256(secret_key.encode()).digest()
+    return base64.urlsafe_b64encode(digest)
+
+def encrypt_cnic(cnic, secret_key):
+    f = Fernet(_fernet_key_from_secret(secret_key))
+    return f.encrypt(cnic.encode()).decode()
+
+def decrypt_cnic(encrypted_cnic, secret_key):
+    f = Fernet(_fernet_key_from_secret(secret_key))
+    try:
+        return f.decrypt(encrypted_cnic.encode()).decode()
+    except InvalidToken:
+        return None
+    # ---------------------------------------------------------------- masking for UI/log display
+def mask_cnic(cnic):
+    """12345-1234567-1 -> *****-*****67-1"""
+    if not cnic or len(cnic) < 4:
+        return "****"
+    return "*" * (len(cnic) - 4) + cnic[-4:]

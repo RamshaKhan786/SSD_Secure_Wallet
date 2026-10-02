@@ -314,7 +314,24 @@ def functional_secure():
         return "Functional secure checks: PASS"
     finally:
         cleanup(path)
+def c14_rate_limit_login(client):
+    """Fire many bad logins; expect 429 after the limit."""
+    statuses = []
+    for i in range(25):
+        r = login(client, "ali", f"bad{i}")
+        statuses.append(r.status_code)
+    blocked = statuses.count(429)
+    return f"25 login attempts -> {blocked} blocked with 429"
 
+
+def c14_rate_limit_transfer(client):
+    login(client, "sara", "Sara@12345")
+    blocked = 0
+    for _ in range(40):
+        r = send_json(client, "ali", "1")
+        if r.status_code == 429:
+            blocked += 1
+    return f"40 transfers -> {blocked} rate-limited"
 
 def security_before_after():
     scenarios = [

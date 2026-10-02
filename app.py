@@ -16,6 +16,7 @@ vulnerable  Deliberately weak mode for the assignment's before/after testing.
              Run it only on a local test machine.
 """
 
+import math
 import os
 import secrets
 import sqlite3
@@ -102,6 +103,41 @@ def authorize_owner(uid):
         abort(403)
 
 
+# ---------------------------------------------------------------- C15: rate limiting helpers
+def client_ip():
+    # Behind a reverse proxy, wrap the app with werkzeug's ProxyFix.
+    # Never read X-Forwarded-For directly: clients can forge it.
+    return request.remote_addr or "unknown"
+
+
+def check_rate_limit(bucket_name, identifier):
+    """Return None if allowed, or the seconds to wait if the limit is hit."""
+    if not app.config["SECURE"]:
+        return None  # vulnerable mode stays unthrottled for before/after tests
+    max_hits, window = controls.rate_limit_policy(bucket_name)
+    if max_hits is None:
+        return None
+    key = controls.bucket_key(bucket_name, identifier)
+    conn = wallet_db.get_db()
+    allowed, _remaining, retry_after = wallet_db.hit_rate_limit(conn, key, window, max_hits)
+    if allowed:
+        return None
+    wallet_db.audit(conn, session.get("uid"), "RATE_LIMITED", key)
+    return retry_after
+
+
+def rate_limit_json(bucket_name, identifier):
+    """For JSON routes: return a 429 response if limited, else None."""
+    wait = check_rate_limit(bucket_name, identifier)
+    if wait is None:
+        return None
+    seconds = max(1, math.ceil(wait))
+    resp = jsonify(ok=False, message=f"Too many requests. Try again in {seconds} seconds.")
+    resp.status_code = 429
+    resp.headers["Retry-After"] = str(seconds)
+    return resp
+
+
 # ---------------------------------------------------------------- request lifecycle security
 @app.before_request
 def csrf_protect():
@@ -167,6 +203,11 @@ def index():
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "POST":
+        wait = check_rate_limit("register_ip", client_ip())
+        if wait is not None:
+            flash(f"Too many sign-ups from this address. Try again in {max(1, math.ceil(wait))} seconds.")
+            return render_template("register.html"), 429
+
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         full_name = request.form.get("full_name", "").strip()
@@ -203,8 +244,19 @@ def login():
     if request.method == "POST":
         username = request.form.get("username", "")
         password = request.form.get("password", "")
+
+        # C15: throttle before any password work. The account bucket also counts
+        # unknown usernames, so it does not reveal which usernames exist.
+        wait = check_rate_limit("login_ip", client_ip())
+        if wait is None:
+            wait = check_rate_limit("login_account", username.strip().lower()[:64])
+        if wait is not None:
+            flash(f"Too many login attempts. Try again in {max(1, math.ceil(wait))} seconds.")
+            return render_template("login.html"), 429
+
         conn = wallet_db.get_db()
         user = None
+        message = "Invalid username or password."
 
         if not app.config["SECURE"]:
             # VULN: injectable SQL and plaintext comparison for the before-test.
@@ -213,18 +265,25 @@ def login():
             row = wallet_db.get_user_by_username(conn, username)
             if row and controls.is_account_locked(row):
                 wallet_db.audit(conn, row["id"], "LOGIN_BLOCKED_LOCKED", "")
+                remaining = max(1, int((row["locked_until"] - time.time()) // 60) + 1)
+                message = (f"Your account is blocked due to too many failed "
+                           f"login attempts. Try again in about {remaining} minute(s).")
             elif row and controls.verify_password(row["password"], password):
                 wallet_db.mark_login_success(conn, row["id"])
                 user = row
             elif row:
-                wallet_db.mark_login_failure(conn, row)
+                # mark_login_failure returns True when this failure triggered the lock.
+                if wallet_db.mark_login_failure(conn, row):
+                    message = (f"Account is blocked now after "
+                               f"{controls.MAX_FAILED_LOGINS} failed attempts. "
+                               f"Try again in {controls.LOCK_SECONDS // 60} minutes.")
 
         if user:
             controls.rotate_session(session, user["id"])
             wallet_db.audit(conn, user["id"], "LOGIN_OK", "")
             return redirect("/dashboard")
 
-        flash("Invalid credentials or account temporarily locked.")
+        flash(message)
 
     return render_template("login.html")
 
@@ -260,6 +319,10 @@ def api_beneficiaries():
 @app.route("/api/beneficiaries", methods=["POST"])
 @login_required
 def api_add_beneficiary():
+    limited = rate_limit_json("beneficiary_user", session["uid"])
+    if limited:
+        return limited
+
     payload = request.get_json(silent=True) or {}
     username = str(payload.get("username", "")).strip()
     conn = wallet_db.get_db()
@@ -278,6 +341,10 @@ def api_add_beneficiary():
 @app.route("/api/beneficiaries/<int:beneficiary_id>", methods=["DELETE"])
 @login_required
 def api_remove_beneficiary(beneficiary_id):
+    limited = rate_limit_json("beneficiary_user", session["uid"])
+    if limited:
+        return limited
+
     valid, parsed_id = controls.validate_beneficiary_id(beneficiary_id)
     if not valid:
         return jsonify(ok=False, message="Invalid beneficiary id."), 400
@@ -301,6 +368,10 @@ def api_remove_beneficiary(beneficiary_id):
 @app.route("/api/transfer", methods=["POST"])
 @login_required
 def api_transfer():
+    limited = rate_limit_json("transfer_user", session["uid"])
+    if limited:
+        return limited
+
     payload = request.get_json(silent=True) or {}
     to = str(payload.get("to", "")).strip()
     amount_str = str(payload.get("amount", "")).strip()
@@ -318,6 +389,11 @@ def api_transfer():
         recipient = wallet_db.get_customer_by_username(conn, to)
         if not recipient or recipient["id"] == session["uid"]:
             return jsonify(ok=False, message="Invalid recipient."), 400
+
+        # Early rejection: do not issue a step-up code for a transfer that can
+        # never succeed. do_transfer() still re-checks the balance atomically.
+        if current_user()["balance"] < amount_or_msg:
+            return jsonify(ok=False, message="Insufficient funds."), 400
 
         if controls.needs_step_up(amount_or_msg):
             code = controls.generate_step_up_code()
@@ -367,6 +443,10 @@ def api_transfer():
 @app.route("/api/transfer/confirm", methods=["POST"])
 @login_required
 def api_transfer_confirm():
+    limited = rate_limit_json("stepup_user", session["uid"])
+    if limited:
+        return limited
+
     payload = request.get_json(silent=True) or {}
     entered_code = str(payload.get("code", ""))
     conn = wallet_db.get_db()
@@ -442,6 +522,11 @@ def api_transfer_confirm():
 @app.route("/transfer", methods=["POST"])
 @login_required
 def transfer():
+    wait = check_rate_limit("transfer_user", session["uid"])
+    if wait is not None:
+        flash(f"Too many transfers. Try again in {max(1, math.ceil(wait))} seconds.")
+        return redirect("/dashboard")
+
     ok, message = wallet_db.do_transfer(
         wallet_db.get_db(),
         current_user(),

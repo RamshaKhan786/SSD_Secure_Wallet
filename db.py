@@ -9,6 +9,7 @@ state.
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
+import time
 
 from flask import current_app, g
 
@@ -99,7 +100,14 @@ def init_db(app):
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY(beneficiary_user_id) REFERENCES users(id) ON DELETE CASCADE
         );
-
+        CREATE TABLE IF NOT EXISTS rate_limits(
+            id INTEGER PRIMARY KEY,
+            bucket TEXT NOT NULL,              
+            window_start REAL NOT NULL,        
+            count INTEGER NOT NULL DEFAULT 0 CHECK(count >= 0),
+            UNIQUE(bucket, window_start)
+);
+        CREATE INDEX IF NOT EXISTS idx_rate_limits_bucket ON rate_limits(bucket, window_start); 
         CREATE INDEX IF NOT EXISTS idx_transactions_sender ON transactions(sender_id);
         CREATE INDEX IF NOT EXISTS idx_transactions_receiver ON transactions(receiver_id);
         CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
@@ -114,15 +122,17 @@ def init_db(app):
         demo_users = [
             ("ali", "Ali@12345", "Ali Khan", "ali@gmail.com", "12345-1234567-1", 50000_00, "customer"),
             ("sara", "Sara@12345", "Sara Ahmed", "sara@gmail.com", "12345-7654321-2", 10000_00, "customer"),
-            ("admin", "Admin@12345", "Auditor", "admin@gmail.com", "12345-0000000-9", 0, "admin")
+            ("admin", "Admin@12345", "Auditor", "admin@gmail.com", "12345-0000000-9", 0, "admin"),
         ]
-    for username, password, full_name, email, cnic, balance, role in demo_users:
-        stored_password = controls.hash_password(password) if secure else password
-        stored_cnic = controls.encrypt_cnic(cnic, app.config["SECRET_KEY"]) if secure else cnic
-        db.execute(
-            "INSERT INTO users(username,password,full_name,email,cnic,balance,role) VALUES(?,?,?,?,?,?,?)",
-            (username, stored_password, full_name, email, stored_cnic, balance, role),
-    )
+        for username, password, full_name, email, cnic, balance, role in demo_users:
+            stored_password = controls.hash_password(password) if secure else password
+            stored_cnic = (controls.encrypt_cnic(cnic, app.config["SECRET_KEY"])
+                           if secure else cnic)
+            db.execute(
+                "INSERT INTO users(username,password,full_name,email,cnic,balance,role) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (username, stored_password, full_name, email, stored_cnic, balance, role),
+            )
     db.close()
 
 
@@ -144,15 +154,24 @@ def audit(db, uid, action, detail=""):
     if not current_app.config["SECURE"]:
         return
 
-    last = db.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
-    prev = last["hash"] if last else controls.GENESIS_HASH
-    ts = now()
-    h = controls.audit_row_hash(prev, ts, uid, action, detail)
-    db.execute(
-        "INSERT INTO audit_log(ts,user_id,action,detail,prev_hash,hash) VALUES(?,?,?,?,?,?)",
-        (ts, uid, action, detail, prev, h),
-    )
-
+    own_tx = not db.in_transaction
+    if own_tx:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        last = db.execute("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+        prev = last["hash"] if last else controls.GENESIS_HASH
+        ts = now()
+        h = controls.audit_row_hash(prev, ts, uid, action, detail)
+        db.execute(
+            "INSERT INTO audit_log(ts,user_id,action,detail,prev_hash,hash) VALUES(?,?,?,?,?,?)",
+            (ts, uid, action, detail, prev, h),
+        )
+        if own_tx:
+            db.execute("COMMIT")
+    except Exception:
+        if own_tx:
+            db.execute("ROLLBACK")
+        raise
 
 def verify_audit(db):
     rows = db.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
@@ -206,6 +225,11 @@ def mark_login_failure(db, user):
     )
     audit(db, user["id"], "LOGIN_FAILED", f"attempt {attempt_number}")
 
+    just_locked = locked_until > 0
+    if just_locked:
+        audit(db, user["id"], "ACCOUNT_LOCKED",
+              f"after {attempt_number} failed attempts")
+    return just_locked
 
 def get_other_demo_user(db, me):
     """Select another customer solely for the Security Lab's demonstration requests."""
@@ -426,3 +450,42 @@ def get_history(db, uid):
         """,
         (uid, uid),
     ).fetchall()
+
+# ---------------------------------------------------------------- rate limiting
+
+def hit_rate_limit(db, bucket, window_seconds, max_hits):
+    """Fixed-window rate limit. Returns (allowed, remaining, retry_after_seconds)."""
+    t = time.time()
+    window_start = t - (t % window_seconds)
+
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute(
+            "DELETE FROM rate_limits WHERE bucket=? AND window_start < ?",
+            (bucket, window_start - window_seconds * 2),
+        )
+        row = db.execute(
+            "SELECT count FROM rate_limits WHERE bucket=? AND window_start=?",
+            (bucket, window_start),
+        ).fetchone()
+        current = row["count"] if row else 0
+
+        if current >= max_hits:
+            db.execute("COMMIT")
+            return False, 0, max((window_start + window_seconds) - t, 0.0)
+
+        if row:
+            db.execute(
+                "UPDATE rate_limits SET count=count+1 WHERE bucket=? AND window_start=?",
+                (bucket, window_start),
+            )
+        else:
+            db.execute(
+                "INSERT INTO rate_limits(bucket, window_start, count) VALUES(?,?,1)",
+                (bucket, window_start),
+            )
+        db.execute("COMMIT")
+        return True, max_hits - (current + 1), 0.0
+    except Exception:
+        db.execute("ROLLBACK")
+        raise

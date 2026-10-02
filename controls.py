@@ -9,7 +9,7 @@ Control map
 -----------
 C1  Password hashing
 C2  Parameterized SQL (implemented throughout db.py)
-C3  Authentication / login protection
+C3  Authentication / login protection (implemented in app.py login())
 C4  Object-level authorization
 C5  Role separation (customer vs admin)
 C6  Server-side input validation
@@ -20,6 +20,8 @@ C10 Session hardening
 C11 Security response headers
 C12 Step-up authentication for high-value transfers
 C13 Beneficiary validation and ownership
+C14 CNIC encryption and masking
+C15 Rate limiting
 """
 
 import hashlib
@@ -48,6 +50,7 @@ EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 CNIC_PATTERN = re.compile(r"^\d{5}-\d{7}-\d{1}$")
 PASSWORD_PATTERN = re.compile(r"^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^\w\s]).{8,}$")
 
+
 # ---------------------------------------------------------------- C1: password hashing
 
 def hash_password(password):
@@ -74,7 +77,7 @@ def is_admin(user):
     return user is not None and user["role"] == "admin"
 
 
-# ---------------------------------------------------------------- C6: server-side validation
+# ---------------------------------------------------------------- C6: server-side input validation
 
 def validate_registration(username, password, full_name, email, cnic):
     if not USERNAME_PATTERN.fullmatch(username):
@@ -89,29 +92,13 @@ def validate_registration(username, password, full_name, email, cnic):
         return False, "CNIC must be in the format 12345-1234567-1."
     return True, None
 
+
 def validate_transfer_recipient(username):
     """Validate a recipient identifier before it is used by the transfer logic."""
     username = (username or "").strip()
     if not USERNAME_PATTERN.fullmatch(username):
         return False, "Recipient username is invalid."
     return True, None
-
-
-def validate_beneficiary_username(username):
-    """Validate the identifier used when adding a beneficiary."""
-    username = (username or "").strip()
-    if not USERNAME_PATTERN.fullmatch(username):
-        return False, "Beneficiary username must be 3-20 characters using lowercase letters, numbers, or _."
-    return True, None
-
-
-def validate_beneficiary_id(value):
-    """Validate a beneficiary record id supplied by the client."""
-    try:
-        beneficiary_id = int(value)
-    except (TypeError, ValueError):
-        return False, None
-    return beneficiary_id > 0, beneficiary_id if beneficiary_id > 0 else None
 
 
 def validate_transfer_amount(amount_str):
@@ -249,16 +236,40 @@ def step_up_code_valid(entered_code, expected_digest, expires_at, secret_key):
     actual = step_up_code_digest(entered_code, secret_key)
     return secrets.compare_digest(actual, expected_digest or "")
 
-#---------------------------------------------------------------- C13: CINC encryption
+
+# ---------------------------------------------------------------- C13: beneficiary validation and ownership
+# Ownership itself is enforced in db.py (queries filter by user_id).
+
+def validate_beneficiary_username(username):
+    """Validate the identifier used when adding a beneficiary."""
+    username = (username or "").strip()
+    if not USERNAME_PATTERN.fullmatch(username):
+        return False, "Beneficiary username must be 3-20 characters using lowercase letters, numbers, or _."
+    return True, None
+
+
+def validate_beneficiary_id(value):
+    """Validate a beneficiary record id supplied by the client."""
+    try:
+        beneficiary_id = int(value)
+    except (TypeError, ValueError):
+        return False, None
+    return beneficiary_id > 0, beneficiary_id if beneficiary_id > 0 else None
+
+
+# ---------------------------------------------------------------- C14: CNIC encryption and masking
+
 def _fernet_key_from_secret(secret_key):
     """Derive a valid 32-byte urlsafe-base64 Fernet key from the app's SECRET_KEY,
     so we don't need to manage a second separate secret."""
     digest = hashlib.sha256(secret_key.encode()).digest()
     return base64.urlsafe_b64encode(digest)
 
+
 def encrypt_cnic(cnic, secret_key):
     f = Fernet(_fernet_key_from_secret(secret_key))
     return f.encrypt(cnic.encode()).decode()
+
 
 def decrypt_cnic(encrypted_cnic, secret_key):
     f = Fernet(_fernet_key_from_secret(secret_key))
@@ -266,9 +277,36 @@ def decrypt_cnic(encrypted_cnic, secret_key):
         return f.decrypt(encrypted_cnic.encode()).decode()
     except InvalidToken:
         return None
-    # ---------------------------------------------------------------- masking for UI/log display
+
+
 def mask_cnic(cnic):
-    """12345-1234567-1 -> *****-*****67-1"""
+    """12345-1234567-1 -> ***********67-1 (only the last 4 characters shown)."""
     if not cnic or len(cnic) < 4:
         return "****"
     return "*" * (len(cnic) - 4) + cnic[-4:]
+
+
+# ---------------------------------------------------------------- C15: rate limiting
+# Fixed-window counters stored in the rate_limits table (see db.hit_rate_limit).
+# Each request increments bucket "<name>:<identifier>" for the current window;
+# once max_hits is reached, further requests get HTTP 429 until the window ends.
+
+# bucket_name: (max_hits, window_seconds)
+RATE_LIMITS = {
+    "login_ip":         (20, 300),   # 20 login tries / 5 min / IP
+    "login_account":    (10, 300),   # 10 login tries / 5 min / username
+    "register_ip":      (5, 3600),   # 5 signups / hour / IP
+    "transfer_user":    (5, 60),     # 5 transfer attempts / min / user
+    "beneficiary_user": (10, 60),    # 10 beneficiary writes / min / user
+    "stepup_user":      (6, 300),    # 6 step-up confirmations / 5 min / user
+}
+
+
+def rate_limit_policy(bucket_name):
+    """Return (max_hits, window_seconds) for a bucket, or (None, None) if unknown."""
+    return RATE_LIMITS.get(bucket_name, (None, None))
+
+
+def bucket_key(name, identifier):
+    """Compose a stable bucket key: 'login_ip:1.2.3.4'."""
+    return f"{name}:{identifier}"

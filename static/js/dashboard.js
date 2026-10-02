@@ -374,6 +374,42 @@ const ATTACKS = [
       data: { message: moved ? 'Money moved without a code.' : 'Balance unchanged; step-up enforced.' },
     };
   }],
+  ['C14', 'Spam login endpoint (rate limit test)', async () => {
+  const results = [];
+  for (let i = 0; i < 25; i++) {
+    const r = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      // Unknown username: avoids locking the real "ali" account, and the
+      // request carries no session cookie, like an unauthenticated attacker.
+      body: new URLSearchParams({ username: 'lab_target', password: `guess${i}` }),
+      credentials: 'omit',
+    });
+    results.push(r.status);
+  }
+  const blocked = results.filter(s => s === 429).length;
+  return {
+    status: blocked > 0 ? 429 : 200,   // non-ok => attack blocked
+    ok: blocked === 0,
+    data: { message: `${results.length} attempts, ${blocked} rate-limited (429)` },
+  };
+}],
+
+['C15', 'Spam transfers (per-user rate limit)', async () => {
+  let blocked = 0;
+  for (let i = 0; i < 40; i++) {
+    const r = await api('/api/transfer', {
+      method: 'POST',
+      json: { to: OTHER, amount: '1' },
+    });
+    if (r.status === 429) blocked++;
+  }
+  return {
+    status: blocked > 0 ? 400 : 200,
+    ok: blocked === 0,
+    data: { message: `40 transfers, ${blocked} rate-limited` },
+  };
+}],
 ];
 
 async function runAttack(index) {
